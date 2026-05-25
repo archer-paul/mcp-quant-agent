@@ -54,10 +54,26 @@ logger = logging.getLogger(__name__)
 
 
 def _is_langfuse_configured() -> bool:
-    """Return True if Langfuse keys are present in settings."""
+    """Return True if Langfuse keys are present in settings.
+
+    As a side-effect, injects the Langfuse keys into os.environ so that the
+    ``langfuse.openai`` drop-in (which creates its own client from env vars)
+    can find them.  pydantic-settings reads .env into Python objects but does
+    NOT inject into os.environ automatically.
+    """
+    import os
+
     from mcp_quant_agent.config import settings
 
-    return bool(settings.langfuse_public_key and settings.langfuse_secret_key)
+    configured = bool(settings.langfuse_public_key and settings.langfuse_secret_key)
+    if configured:
+        if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
+            os.environ["LANGFUSE_PUBLIC_KEY"] = settings.langfuse_public_key
+        if not os.environ.get("LANGFUSE_SECRET_KEY"):
+            os.environ["LANGFUSE_SECRET_KEY"] = settings.langfuse_secret_key
+        if not os.environ.get("LANGFUSE_HOST"):
+            os.environ["LANGFUSE_HOST"] = settings.langfuse_host
+    return configured
 
 
 def get_langfuse_client() -> Any:

@@ -245,6 +245,9 @@ class OpenAIBackbone:
             ],
             temperature=0.2,
             max_tokens=512,
+            # Force JSON output so _parse_decision never falls back to hold.
+            # Requires the system prompt to mention "JSON" (it does).
+            response_format={"type": "json_object"},
         )
         content = str(response.choices[0].message.content or "")
 
@@ -336,6 +339,8 @@ def build_graph(
 
     # ── Validate API key (fail loud) ─────────────────────────────────────────
     if not use_stub:
+        import os
+
         from mcp_quant_agent.config import settings
 
         if not settings.openai_api_key:
@@ -346,6 +351,18 @@ def build_graph(
                 "  2. Pass use_stub=True to use the deterministic stub backbone.\n"
                 "WARNING: stub results are plumbing tests ONLY — never cite in thesis."
             )
+        # pydantic-settings reads .env into Python objects but does NOT inject
+        # into os.environ.  The OpenAI SDK (and langfuse.openai drop-in) reads
+        # OPENAI_API_KEY from the process environment, so we forward it here.
+        if not os.environ.get("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+
+    # ── Inject Langfuse env vars (same reason: pydantic-settings doesn't set os.environ)
+    # Must be called BEFORE importing langfuse.openai so the drop-in client can find
+    # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY in the process environment.
+    from mcp_quant_agent.observability.langfuse_setup import _is_langfuse_configured
+
+    _is_langfuse_configured()
 
     # ── Build backbone ────────────────────────────────────────────────────────
     if portfolio is None:
