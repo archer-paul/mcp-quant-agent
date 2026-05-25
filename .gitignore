@@ -2,7 +2,7 @@
 .env
 
 # Data & caches (large, reproducible, not for git)
-data/
+/data/
 *.parquet
 *.csv
 !tests/**/*.csv          # keep small fixtures used by tests
