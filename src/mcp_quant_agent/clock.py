@@ -93,12 +93,30 @@ DateLike = dt.datetime | dt.date | str
 def _to_datetime(ts: DateLike) -> dt.datetime:
     """Normalise a timestamp to a UTC-naive :class:`~datetime.datetime`.
 
-    Supported input types:
+    Internal UTC-naive convention
+    ------------------------------
+    All timestamps are stored and compared as **UTC-naive** datetimes (i.e.
+    ``tzinfo=None``).  This avoids mixed-offset comparison errors and is safe
+    because:
 
-    - :class:`~datetime.datetime` — timezone info is stripped (all comparisons
-      are UTC-naive to avoid ambiguous offset arithmetic in backtests).
-    - :class:`~datetime.date` — converted to midnight ``00:00:00``.
-    - ``str`` — parsed as ISO-8601.  Accepted formats:
+    - yfinance / Finnhub timestamps are already UTC (or timezone-naive UTC).
+    - Backtest date strings like ``"2022-06-15"`` represent midnight UTC.
+    - Timezone-aware inputs are **converted to UTC first** before stripping the
+      offset.  A naive strip (``replace(tzinfo=None)``) would silently
+      misplace the timestamp — e.g. a Tokyo +09:00 datetime would look 9 hours
+      earlier than it really is in UTC, corrupting boundary comparisons.
+
+    See ``docs/DECISIONS.md`` — "UTC-naive internal timestamps" entry.
+
+    Supported input types
+    ---------------------
+    - :class:`~datetime.datetime` (aware) — converted to UTC via
+      ``astimezone(UTC)``, then timezone stripped.
+    - :class:`~datetime.datetime` (naive) — assumed to be UTC already; returned
+      as-is (no conversion needed).
+    - :class:`~datetime.date` — converted to midnight ``00:00:00`` UTC-naive.
+    - ``str`` — parsed as ISO-8601 (no offset support in strings; strings are
+      always treated as UTC-naive).  Accepted formats:
       ``"YYYY-MM-DD"``, ``"YYYY-MM-DDTHH:MM:SS"``, ``"YYYY-MM-DDTHH:MM"``,
       ``"YYYY-MM-DD HH:MM:SS"``, ``"YYYY-MM-DD HH:MM"``.
 
@@ -110,10 +128,15 @@ def _to_datetime(ts: DateLike) -> dt.datetime:
         If *ts* is not a ``datetime``, ``date``, or ``str``.
     """
     if isinstance(ts, dt.datetime):
-        # Strip timezone — we work entirely in UTC-naive datetimes.
-        # Reason: yfinance / Finnhub timestamps are often timezone-naive;
-        # mixing naive and aware datetimes causes comparison errors.
-        return ts.replace(tzinfo=None)
+        if ts.tzinfo is not None:
+            # Aware datetime: convert to UTC first, THEN strip the offset.
+            # Using replace(tzinfo=None) directly would silently misplace the
+            # timestamp — e.g. 2022-06-16T08:00+09:00 is actually
+            # 2022-06-15T23:00 UTC, but a bare replace gives 2022-06-16T08:00,
+            # making it look like a future date when it is actually past.
+            return ts.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        # Naive datetime: treat as UTC (already in the correct reference frame).
+        return ts
     if isinstance(ts, dt.date):
         # date.date → datetime at midnight
         return dt.datetime(ts.year, ts.month, ts.day)

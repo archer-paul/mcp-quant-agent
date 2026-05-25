@@ -5,6 +5,45 @@
 
 ---
 
+### 2026-05 — UTC-naive internal timestamps (timezone-aware inputs converted first)
+- **Context:** ``_to_datetime`` stripped timezone with ``.replace(tzinfo=None)`` — a
+  bare strip that discards the UTC offset without adjusting the wall-clock time.  A
+  Tokyo +09:00 news item at ``2022-06-15T01:00+09:00`` (= ``2022-06-14T16:00 UTC``)
+  would be misidentified as *future* relative to ``t_now = 2022-06-15T00:00 UTC``,
+  and a US -08:00 item at ``2022-06-14T20:00-08:00`` (= ``2022-06-15T04:00 UTC``)
+  would be misidentified as *past*.
+- **Decision:** If the input datetime is timezone-aware, call
+  ``.astimezone(dt.timezone.utc).replace(tzinfo=None)`` to convert to UTC first.
+  Naive inputs are treated as UTC already (yfinance/Finnhub return UTC-naive).
+  ISO-8601 strings have no offset — always treated as UTC-naive.
+  Internal convention: **all timestamps are UTC-naive throughout the codebase**.
+- **Consequence:** Timezone-aware inputs (e.g. from external APIs that include offsets)
+  are correctly compared.  Tests ``TestTimezoneHandling`` verify both directions of
+  boundary crossing.  No breaking change for existing tests (they use UTC-naive inputs).
+
+### 2026-05 — Baselines use pandas, not vectorbt
+- **Context:** PLAN.md listed vectorbt; CLAUDE.md says "baselines in vectorbt".
+  vectorbt is an optional extra (heavy scipy/numba dependency).  The baseline logic
+  is simple daily arithmetic — no vectorbt-specific features are needed.
+- **Decision:** Implement baselines in plain pandas + our existing ``eval/financial.py``
+  metrics.  vectorbt retained as optional extra for potential future use (e.g.
+  portfolio-level optimisation).  The change is noted here; the thesis methodology
+  chapter describes the signal rules, not the library.
+- **Consequence:** No extra install step; baselines are readable without vectorbt docs.
+  If a reviewer asks "why not vectorbt?", the answer is: simplicity and readability
+  outweigh vectorbt's performance benefits on daily data of this scale.
+
+### 2026-05 — Stub backbone for smoke-testing agent loop (NEVER for thesis results)
+- **Context:** The agent loop needs an OpenAI API key.  During development/CI we want
+  to verify the plumbing (clock → perceive → reason → execute → NAV) without burning
+  budget.
+- **Decision:** A ``StubBackbone`` class that uses a simple deterministic rule
+  (trend-following: buy if price > SMA20, sell if < SMA20·0.98) is enabled via
+  ``use_stub=True``.  The engine raises loudly if ``OPENAI_API_KEY`` is missing and
+  ``use_stub=False``.  Stub output is clearly labelled in all reports.
+- **Consequence:** Any run with ``backbone=stub`` in the results JSON must NEVER be
+  cited in the thesis.  Only runs with ``backbone=gpt-4.1`` (or similar) are valid.
+
 ### 2026-05 — Langfuse SDK version: v3+ (CLAUDE.md says "v4+")
 - **Context:** CLAUDE.md specifies "SDK v4+" but the PyPI package ``langfuse`` is
   at v3.x (as of May 2026 the package version numbering may have advanced).
