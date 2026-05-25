@@ -1,0 +1,36 @@
+# Single-agent backtest configuration
+# Used by: python scripts/run_agent_backtest.py --config configs/single_agent.yaml
+
+# ── Universe ──────────────────────────────────────────────────────────────────
+tickers:
+  - AAPL
+  - MSFT
+  - NVDA
+  - JPM
+  - XOM
+
+# ── Backtest window ───────────────────────────────────────────────────────────
+# 2022→2024 spans at least 2 regimes: 2022 bear + 2023-24 bull
+# (≥2 regimes required for regime-segmented evaluation)
+start_date: "2022-01-03"
+end_date: "2024-12-31"
+
+# ── Portfolio ─────────────────────────────────────────────────────────────────
+initial_cash: 100000.0
+
+# ── LLM ───────────────────────────────────────────────────────────────────────
+# Use cheap model for dev; set to agent_model_final for final runs
+model: gpt-4.1-mini
+# model: gpt-4.1  # uncomment for final runs
+
+# ── Agent ─────────────────────────────────────────────────────────────────────
+architecture: single_agent
+# architecture: multi_agent  # enable in week 2
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+bootstrap_n: 1000
+bootstrap_seed: 42
+
+# ── Observability ─────────────────────────────────────────────────────────────
+langfuse_enabled: true
+llm_cache: true  # cache responses during dev (disable for final runs)

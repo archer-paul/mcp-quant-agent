@@ -1,0 +1,37 @@
+# Secrets
+.env
+
+# Data & caches (large, reproducible, not for git)
+data/
+*.parquet
+*.csv
+!tests/**/*.csv          # keep small fixtures used by tests
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Experiment outputs (keep these reproducible via scripts/reproduce_all.py)
+runs/
+results/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# reference/ clones (read-only, not shipped)
+reference/
