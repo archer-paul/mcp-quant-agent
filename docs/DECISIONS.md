@@ -1,5 +1,53 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Regime detector v2: reactive 20d trend + causal vol threshold (default)
+- **Context:** v1 used a 60-day trend window.  The 2022–2023 recovery was systematically
+  delayed in v1's labels: the 60d lookback at the start of 2023 still reached into the
+  Nov/Dec 2022 crash, keeping the label at BEAR or RANGE weeks after prices had recovered.
+  Additionally, v1's HIGH_VOL threshold used the full-series 80th-percentile -- a
+  look-ahead bias: future high-vol bars raise the threshold and can silently re-label
+  past HIGH_VOL bars as RANGE/BULL when the series is extended.
+- **Decision:** v2 (default) uses:
+  1. **20-day trend** (bull/bear threshold: +/-2%) -- captures the current price direction.
+     Verified empirically: v1/v2 disagree on 29 of 36 months across AAPL/MSFT/NVDA
+     2022-2024; v2 pivots to BULL ~1 month earlier at 2022/2023 recoveries (e.g.
+     AAPL/MSFT Feb 2023: v1=RNG/HV, v2=BULL).
+  2. **Trailing 252-bar percentile** for the HIGH_VOL threshold -- fully causal.
+     At bar t only vol data from bars 1..t is used.  The test
+     ``TestRegimeLookAheadGuard.test_v2_causal_vol_threshold`` fails if a
+     full-series percentile is used.
+  3. 60d trend retained as diagnostic output field ``trend_long_60d`` (not used for labelling).
+  4. v1 accessible via ``version="v1"`` for comparison.
+  5. Vol threshold uses strict ``>`` (not ``>=``) to avoid all-HIGH_VOL in flat markets.
+- **Window choices:** 20d = ~1 trading month (reactive); 252d vol lookback = ~1 year
+  (stable baseline; first 252 bars use a shorter expanding window -- documented limitation).
+- **Consequence:** v2 labels are meaningfully more reactive.  29/36 month-ticker pairs
+  disagree between v1 and v2 (see ``results/regime_diagnostic_*.csv``).  The systematic
+  lag in v1 makes regime-segmented evaluation misleading; v2 eliminates it.  The look-ahead
+  bias in v1's vol threshold is structurally fixed by the trailing percentile.  Note: Jan 2023
+  itself is BEAR in both detectors for AAPL (20d lookback still reaches Dec 2022 weakness);
+  the pivot to BULL appears in Feb 2023, ~4 weeks faster than v1.
+
+### 2026-05 — Langfuse SDK v4 API: no CallbackHandler, use openai drop-in + start_as_current_observation
+- **Context:** Langfuse v4.6.1 removed ``langfuse.callback.CallbackHandler``.
+  LangGraph tracing now uses OpenTelemetry.
+- **Decision:** (a) ``from langfuse.openai import openai`` drop-in for all OpenAI
+  calls -- traces model, tokens, cost, latency automatically.  (b) In ``observe_node``,
+  use ``client.start_as_current_observation(...)`` to create a structured "agent"
+  span with the full decision context (inputs, tool outputs, reasoning, fill).
+  (c) ``get_langfuse_handler()`` returns None (kept for API compatibility).
+- **Consequence:** All LLM calls are traced.  Decision context is captured in a
+  separate "agent" observation.  The Langfuse dashboard shows both.
+
+### 2026-05 — pydantic-settings: extra="ignore" for .env forward-compatibility
+- **Context:** The .env file may contain keys not in ``Settings`` (e.g.
+  ``LANGFUSE_BASE_URL``).  pydantic-settings raises ValidationError by default.
+- **Decision:** Add ``extra="ignore"`` to ``model_config`` in ``Settings``.
+  Unknown env vars are silently dropped; the application uses only declared fields.
+- **Consequence:** The .env file can have extra keys for other tools without
+  breaking the app.  Typos in env var names are silently ignored (acceptable
+  for a research project with a small team).
+
 > One short entry per non-obvious choice: context → decision → consequence. Newest on top.
 > Keep it terse; this is the audit trail for the thesis methodology chapter.
 

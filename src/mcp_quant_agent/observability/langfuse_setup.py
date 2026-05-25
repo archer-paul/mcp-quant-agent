@@ -1,51 +1,48 @@
-"""Langfuse Cloud tracing wiring.
+"""Langfuse Cloud tracing wiring -- SDK v4.x.
 
-Policy (from CLAUDE.md)
------------------------
-- **Cloud only** — do NOT self-host.  YC credits cover $100/mo.
-- **SDK v3+ API** — CLAUDE.md labels this "v4+" but the current PyPI package
-  is langfuse ≥ 3.0.  The import paths match the v3 API.
-  See docs/DECISIONS.md for the version clarification.
-- **Do NOT** use ``from langfuse.decorators import ...`` — that module was
-  removed in the v3+ SDK.
+SDK version note (v4)
+---------------------
+The installed ``langfuse`` package is v4.x (verified: 4.6.1).  The API has
+changed from v3:
 
-What to trace (per CLAUDE.md)
-------------------------------
-Every agent decision is logged as a structured Langfuse trace containing:
-- Inputs seen (bars, news, indicators, portfolio state)
-- Tool calls + their actual outputs (for grounding evaluation)
-- The model's chain-of-thought
-- The resulting order (for faithfulness evaluation)
-- Latency, token count, cost
+- **No** ``from langfuse.callback import CallbackHandler``  -- module was
+  removed.  LangGraph tracing in v4 goes through OpenTelemetry.
+- **No** ``trace(id=...)``  -- the old trace-by-ID pattern is gone.
+- ``from langfuse.openai import openai``  -- drop-in, works in v4.  All
+  OpenAI calls are automatically traced with full token/cost data.
+- ``get_client().start_as_current_observation(...)``  -- context-manager for
+  creating custom spans.  Used in ``log_decision``.
+- ``get_client().score_current_trace(...)``  -- attaches a score to the
+  trace that is current in the OTEL context.
 
-Scores attached to traces (for regime-segmented dashboards)
-------------------------------------------------------------
-After evaluation (J9 sprint), faithfulness / grounding / sophistication scores
-are attached to the relevant traces via ``langfuse.score()``.  This gives
-regime-segmented eval dashboards "for free" in the Langfuse UI.
+CLAUDE.md says "v4+" -- this matches the installed version.
+
+What is traced
+--------------
+- Every OpenAI call (auto-traced by ``langfuse.openai`` drop-in) with full
+  model, tokens, cost, latency.
+- Every agent decision (``log_decision``) as an "agent" observation:
+  inputs (bars, news, indicators, regime, portfolio), reasoning (CoT),
+  decision, fill, latency.
+- Reasoning-eval scores attached via ``score_trace`` after evaluation.
 
 Usage
 -----
-For LangGraph (pass the callback handler in the graph config)::
+For drop-in OpenAI tracing (in orchestrator)::
 
-    from mcp_quant_agent.observability.langfuse_setup import get_langfuse_handler
-    handler = get_langfuse_handler()
-    graph.invoke(state, config={"callbacks": [handler]})
+    from langfuse.openai import openai  # NOT standard openai
+    response = openai.chat.completions.create(...)
+    # Automatically traced with all metadata.
 
-For drop-in OpenAI tracing (replaces ``openai`` import)::
+For manual observation (in observe_node)::
 
-    from langfuse.openai import openai  # NOT the standard openai import
-    client = openai.OpenAI(api_key=settings.openai_api_key)
-    # All calls to this client are automatically traced
+    from mcp_quant_agent.observability.langfuse_setup import log_decision
+    log_decision(trace_id=..., t_now=..., ...)
 
-For manual span creation::
+For attaching eval scores later::
 
-    from langfuse import get_client, observe
-    lf = get_client()
-    with lf.start_as_current_span("decision") as span:
-        span.update(input={"ticker": "AAPL", "t_now": "2022-06-15"})
-        ...
-        span.update(output=decision)
+    from mcp_quant_agent.observability.langfuse_setup import score_trace
+    score_trace(trace_id=..., name="faithfulness", value=0.85)
 """
 
 from __future__ import annotations
@@ -57,31 +54,25 @@ logger = logging.getLogger(__name__)
 
 
 def _is_langfuse_configured() -> bool:
-    """Return True if Langfuse keys are set in settings."""
+    """Return True if Langfuse keys are present in settings."""
     from mcp_quant_agent.config import settings
 
     return bool(settings.langfuse_public_key and settings.langfuse_secret_key)
 
 
 def get_langfuse_client() -> Any:
-    """Return an initialised Langfuse client.
-
-    Uses settings from ``mcp_quant_agent.config``.  Returns ``None`` if
-    Langfuse is not configured (missing keys) — callers must handle this
-    gracefully so the agent runs even without tracing.
+    """Return an initialised Langfuse client, or None if not configured.
 
     Returns
     -------
     langfuse.Langfuse | None
-        Initialised client, or None if keys are not configured.
     """
     if not _is_langfuse_configured():
         logger.warning(
-            "Langfuse keys not configured — tracing disabled. "
+            "Langfuse keys not configured -- tracing disabled. "
             "Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY in .env to enable."
         )
         return None
-
     try:
         from langfuse import Langfuse
 
@@ -97,71 +88,19 @@ def get_langfuse_client() -> Any:
         return None
 
 
-def get_langfuse_handler() -> Any:
-    """Return a Langfuse callback handler for LangGraph.
+def get_langfuse_handler() -> None:
+    """No-op in Langfuse v4 -- CallbackHandler is no longer available.
 
-    Pass this to the LangGraph graph's ``config`` dict::
+    In v4, LangGraph tracing uses the ``langfuse.openai`` drop-in (which
+    auto-traces every OpenAI call) plus manual ``start_as_current_observation``
+    spans.  There is no separate LangGraph callback handler.
 
-        graph.invoke(state, config={"callbacks": [get_langfuse_handler()]})
-
-    This traces all LangGraph node calls, LLM calls, and tool calls
-    automatically without manual instrumentation of every node.
-
-    Returns ``None`` if Langfuse is not configured.
+    Kept for API compatibility; always returns None.
     """
-    if not _is_langfuse_configured():
-        return None
-
-    try:
-        from langfuse.callback import CallbackHandler
-
-        from mcp_quant_agent.config import settings
-
-        return CallbackHandler(
-            public_key=settings.langfuse_public_key,
-            secret_key=settings.langfuse_secret_key,
-            host=settings.langfuse_host,
-        )
-    except ImportError as exc:
-        logger.warning("Langfuse callback handler not available: %s", exc)
-        return None
-
-
-def score_trace(
-    trace_id: str,
-    name: str,
-    value: float,
-    comment: str | None = None,
-) -> None:
-    """Attach a numeric score to an existing Langfuse trace.
-
-    Use this to attach reasoning-eval metrics (faithfulness, grounding,
-    sophistication) after they are computed, so they appear in the Langfuse
-    UI and enable regime-segmented dashboards.
-
-    Parameters
-    ----------
-    trace_id:
-        The Langfuse trace ID (from the callback handler or a manual trace).
-    name:
-        Score name (e.g. ``"faithfulness"``, ``"grounding"``, ``"sophistication"``).
-    value:
-        Numeric score value.
-    comment:
-        Optional human-readable note (e.g. regime label, decision summary).
-    """
-    client = get_langfuse_client()
-    if client is None:
-        return
-    try:
-        client.score(
-            trace_id=trace_id,
-            name=name,
-            value=value,
-            comment=comment,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to score trace %s: %s", trace_id, exc)
+    logger.debug(
+        "Langfuse v4: no LangGraph callback handler -- use langfuse.openai drop-in."
+    )
+    return None
 
 
 def log_decision(
@@ -176,68 +115,104 @@ def log_decision(
     latency_ms: float,
     token_usage: dict[str, int] | None = None,
 ) -> None:
-    """Log a full structured agent decision to Langfuse.
+    """Log a full structured agent decision to Langfuse as an observation.
 
-    This is called by the orchestrator's ``observe`` node after each decision.
-    The trace schema captures everything needed for faithfulness and grounding
-    evaluation:
-    - Inputs (bars, news, indicators, portfolio) — the "perceived state"
-    - Tool outputs — the actual data returned (for grounding)
-    - Reasoning — the model's CoT
-    - Decision + fill — for faithfulness evaluation
-    - Latency + tokens — for the cost/latency axis
+    Creates an "agent" observation containing the complete decision trace:
+    - Inputs (bars, news, indicators, portfolio) for grounding evaluation
+    - Tool call outputs (actual data seen by the agent)
+    - Reasoning / CoT
+    - Decision + fill for faithfulness evaluation
+    - Latency and token usage
+
+    Uses ``start_as_current_observation`` (Langfuse v4 API).
 
     Parameters
     ----------
     trace_id:
-        Trace ID from the LangGraph callback handler.
+        Logical trace ID (used as observation name suffix for grouping).
+        In Langfuse v4, traces are created automatically by the openai drop-in.
     t_now, ticker:
         Decision context.
     inputs:
-        Perceived state dict (bars, news, indicators, portfolio).
+        Perceived state dict (bars_recent, news_recent, indicators, portfolio).
     tool_outputs:
-        List of actual tool-call outputs (for grounding).
+        List of tool-call result summaries (for grounding).
     reasoning:
-        Raw CoT string from the LLM.
+        Raw CoT string from the LLM response.
     decision:
-        Parsed decision dict ``{action, ticker, quantity, rationale}``.
+        Parsed decision dict ``{action, quantity, rationale}``.
     fill:
-        Fill confirmation from the execution server (None if "hold").
+        Fill confirmation from the paper portfolio (None for "hold").
     latency_ms:
-        Total perceive→act latency in milliseconds.
+        Total perceive -> act latency in milliseconds.
     token_usage:
         ``{prompt_tokens, completion_tokens, total_tokens}``.
     """
     client = get_langfuse_client()
     if client is None:
         return
-
     try:
-        trace = client.trace(id=trace_id)
-        trace.update(
-            metadata={
+        with client.start_as_current_observation(
+            name=f"agent-decision-{ticker}",
+            as_type="agent",
+            input={
                 "t_now": t_now,
                 "ticker": ticker,
-                "action": decision.get("action"),
-                "latency_ms": latency_ms,
-                "token_usage": token_usage or {},
+                **inputs,
+                "tool_outputs": tool_outputs,
             },
-            input=inputs,
             output={
                 "reasoning": reasoning,
                 "decision": decision,
                 "fill": fill,
-                "tool_outputs": tool_outputs,
             },
-        )
+            metadata={
+                "trace_id": trace_id,
+                "action": decision.get("action"),
+                "latency_ms": round(latency_ms, 1),
+                "token_usage": token_usage or {},
+            },
+        ):
+            pass  # span is created and closed; content captured above
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to log decision to Langfuse: %s", exc)
 
 
-def flush() -> None:
-    """Flush the Langfuse client to ensure all events are sent.
+def score_trace(
+    trace_id: str,
+    name: str,
+    value: float,
+    comment: str | None = None,
+) -> None:
+    """Attach a numeric score to the current Langfuse trace context.
 
-    Call at the end of a backtest run to prevent data loss.
+    Use after evaluation (e.g. faithfulness, grounding, sophistication)
+    so scores appear in the Langfuse UI and enable regime-segmented dashboards.
+
+    Parameters
+    ----------
+    trace_id:
+        Logical trace ID (for logging only; v4 scores attach to current context).
+    name:
+        Score name (e.g. ``"faithfulness"``, ``"grounding"``, ``"sophistication"``).
+    value:
+        Numeric score value.
+    comment:
+        Optional note (e.g. regime label, decision summary).
+    """
+    client = get_langfuse_client()
+    if client is None:
+        return
+    try:
+        client.score_current_trace(name=name, value=value, comment=comment)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to score trace %s: %s", trace_id, exc)
+
+
+def flush() -> None:
+    """Flush the Langfuse client to ensure all queued events are sent.
+
+    Call at the end of a backtest run to avoid data loss on process exit.
     """
     client = get_langfuse_client()
     if client is None:

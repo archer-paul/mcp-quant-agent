@@ -77,6 +77,9 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        # Ignore unknown env vars (e.g. LANGFUSE_BASE_URL which is a common
+        # alias — the SDK reads LANGFUSE_HOST; unknown vars are silently dropped).
+        extra="ignore",
     )
 
 

@@ -268,6 +268,16 @@ class BacktestEngine:
             nav_series[-1] if nav_series else 0.0,
         )
 
+        # Flush Langfuse to ensure all trace events are sent before process ends.
+        if not self.use_stub:
+            try:
+                from mcp_quant_agent.observability.langfuse_setup import flush
+
+                flush()
+                logger.info("Langfuse traces flushed.")
+            except Exception as exc:
+                logger.debug("Langfuse flush skipped: %s", exc)
+
         return {
             "nav_series": nav_series,
             "metrics": metrics,

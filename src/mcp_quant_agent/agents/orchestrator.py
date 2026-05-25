@@ -37,6 +37,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -101,25 +102,28 @@ def _save_cache(key: str, response: str) -> None:
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """You are a quantitative trading agent managing a paper portfolio.
+Today's simulation date is given in the user message as T_NOW.  You can only
+act on data available at or before T_NOW.  Do not speculate about future events.
 
 Your task: analyse the provided market data for the given ticker and make ONE
-trading decision.  Follow this reasoning chain:
+trading decision.  Work through this chain-of-thought:
 
-1. TREND: What is the price trend over the last 20 bars? (SMA, direction)
-2. MOMENTUM: What do RSI and MACD suggest?
-3. VOLATILITY: Is volatility elevated? (Bollinger width, ATR)
-4. NEWS SENTIMENT: Summarise the 3 most recent news items and their direction.
-5. PORTFOLIO: What is the current exposure? Is concentration risk acceptable?
-6. DECISION: Given the above, state your action and rationale.
+1. TREND: What is the price trend over the last 20 bars? Compare close to SMA20.
+2. MOMENTUM: What do RSI-14 and MACD suggest about momentum direction?
+3. VOLATILITY: Are Bollinger Bands wide / ATR elevated (high-vol regime)?
+4. REGIME: What is the current market regime label? Is it consistent with your analysis?
+5. NEWS SENTIMENT: Summarise the 3 most relevant news items and their likely direction.
+6. PORTFOLIO: What is current exposure? Is position size within the 20%-NAV limit?
+7. DECISION: State action, exact integer quantity, and 2-3 sentence rationale.
 
-Respond with ONLY a JSON object (no markdown fences):
-{"action": "buy"|"sell"|"hold", "quantity": <positive_integer>, "rationale": "<2-3 sentence reasoning>"}
+Output ONLY a JSON object -- no prose, no markdown code fences, no extra keys:
+{"action": "buy"|"sell"|"hold", "quantity": <non-negative integer>, "rationale": "<2-3 sentences>"}
 
 Rules:
 - "hold" -> quantity MUST be 0.
-- Quantity is the number of shares (integer >= 0).
-- Never exceed 20% of NAV in a single position.
-- If data is insufficient, respond with hold, quantity 0.
+- "buy" / "sell" -> quantity MUST be > 0.
+- Single position MUST NOT exceed 20% of portfolio NAV.
+- Insufficient data -> {"action": "hold", "quantity": 0, "rationale": "insufficient data"}.
 """
 
 
@@ -158,6 +162,7 @@ class StubBackbone:
 
     def decide(self, state: AgentState) -> dict[str, Any]:
         bars = state["bars"]
+        ticker = state["ticker"]
         if len(bars) < 5:
             return {"action": "hold", "quantity": 0, "rationale": "stub: insufficient data"}
 
@@ -175,9 +180,23 @@ class StubBackbone:
                 "rationale": f"stub: close {last_close:.2f} > SMA20 {sma:.2f} * 1.02",
             }
         if last_close < sma * 0.98:
+            # Only sell if we actually hold a position -- no short selling.
+            positions = portfolio.get("positions", [])
+            held = 0.0
+            for pos in positions:
+                if isinstance(pos, dict) and pos.get("ticker") == ticker:
+                    held = float(pos.get("quantity", 0.0))
+                    break
+            if held <= 0:
+                return {
+                    "action": "hold",
+                    "quantity": 0,
+                    "rationale": f"stub: close {last_close:.2f} < SMA20 {sma:.2f} * 0.98 but no position to sell",
+                }
+            sell_qty = min(max_qty, int(held))
             return {
                 "action": "sell",
-                "quantity": max_qty,
+                "quantity": sell_qty,
                 "rationale": f"stub: close {last_close:.2f} < SMA20 {sma:.2f} * 0.98",
             }
         return {
@@ -237,33 +256,45 @@ class OpenAIBackbone:
 
     @staticmethod
     def _build_prompt(state: AgentState) -> str:
-        bars = state["bars"][-30:]
+        """Build the user-turn prompt for the LLM.
+
+        All data presented here is filtered to <= T_NOW by the data layer.
+        The agent must make a decision based ONLY on this data.
+        """
+        bars = state["bars"][-30:]  # last 30 bars (for context)
         news = state["news"][:5]
         indicators = state.get("indicators", {})
         portfolio = state.get("portfolio", {})
-        regime = state.get("regime", "unknown")
+        regime = state.get("regime") or "unknown"
 
         bar_rows = [
             f"  {b['date']} O={float(b['open']):.2f} H={float(b['high']):.2f} "
             f"L={float(b['low']):.2f} C={float(b['close']):.2f} V={int(b.get('volume', 0)):,}"
             for b in bars
         ]
-        bar_text = "\n".join(bar_rows) if bar_rows else "  (no data)"
+        bar_text = "\n".join(bar_rows) if bar_rows else "  (no bars available)"
 
         news_rows = [
-            f"  [{n.get('datetime', '')}] {n.get('headline', '')}"
+            f"  [{n.get('datetime', n.get('date', ''))}] {n.get('headline', n.get('title', ''))}"
             for n in news
         ]
-        news_text = "\n".join(news_rows) if news_rows else "  (no recent news)"
+        news_text = "\n".join(news_rows) if news_rows else "  (no recent news -- Finnhub key may not be set)"
+
+        # Clean up indicators for display (round floats, drop None)
+        ind_clean = {k: round(v, 4) if isinstance(v, float) else v
+                     for k, v in indicators.items() if v is not None}
 
         return (
-            f"Date: {state['t_now_str']}\n"
+            f"T_NOW (simulation date, do not use data after this): {state['t_now_str']}\n"
             f"Ticker: {state['ticker']}\n"
-            f"Regime: {regime}\n\n"
-            f"Price bars (most recent last):\n{bar_text}\n\n"
-            f"Indicators: {json.dumps(indicators, indent=2)}\n\n"
-            f"Recent news:\n{news_text}\n\n"
-            f"Portfolio: {json.dumps(portfolio, indent=2)}\n"
+            f"Market regime (v2 detector): {regime}\n\n"
+            f"Price bars, oldest to newest (last {len(bars)} bars up to T_NOW):\n"
+            f"{bar_text}\n\n"
+            f"Technical indicators (computed at T_NOW):\n"
+            f"{json.dumps(ind_clean, indent=2)}\n\n"
+            f"Recent news (up to T_NOW):\n{news_text}\n\n"
+            f"Portfolio state:\n{json.dumps(portfolio, indent=2)}\n\n"
+            f"Provide your chain-of-thought then output the JSON decision.\n"
         )
 
 
@@ -399,12 +430,15 @@ def build_graph(
         }
 
     def reason_and_act_node(state: AgentState) -> dict[str, Any]:
-        """Call LLM backbone, parse decision, execute order."""
+        """Call LLM backbone, parse decision, execute order, record latency."""
         ticker = state["ticker"]
         bars = state["bars"]
         errors = list(state.get("errors", []))
 
+        t_start = time.perf_counter()
         decision = backbone.decide(state)
+        latency_ms = (time.perf_counter() - t_start) * 1000.0
+
         action = decision.get("action", "hold").lower()
         quantity = int(decision.get("quantity", 0))
         rationale = str(decision.get("rationale", ""))
@@ -426,6 +460,10 @@ def build_graph(
                 errors.append(f"order_rejected: {exc}")
                 logger.warning("Order rejected for %s: %s", ticker, exc)
 
+        # Stash latency inside the decision dict so observe_node can read it.
+        # Uses a leading-underscore key to distinguish from semantic fields.
+        decision["_latency_ms"] = round(latency_ms, 1)
+
         return {
             "reasoning": rationale,
             "decision": decision,
@@ -434,32 +472,75 @@ def build_graph(
         }
 
     def observe_node(state: AgentState) -> dict[str, Any]:
-        """Log the decision trace to Langfuse (best-effort, non-blocking)."""
-        try:
-            from mcp_quant_agent.observability.langfuse_setup import (
-                get_langfuse_client,
-                log_decision,
-            )
+        """Log the full decision trace to Langfuse (best-effort, non-blocking).
 
-            client = get_langfuse_client()
-            if client is not None:
-                log_decision(
-                    trace_id=f"{state['ticker']}-{state['t_now_str']}",
-                    t_now=state["t_now_str"],
-                    ticker=state["ticker"],
-                    inputs={
-                        "bars_count": len(state["bars"]),
-                        "news_count": len(state["news"]),
-                        "indicators": state.get("indicators", {}),
-                        "regime": state.get("regime"),
-                        "portfolio": state.get("portfolio", {}),
-                    },
-                    tool_outputs=[],
-                    reasoning=state.get("reasoning", ""),
-                    decision=state.get("decision", {}),
-                    fill=state.get("fill"),
-                    latency_ms=0.0,
-                )
+        Captures everything needed for faithfulness and grounding evaluation:
+        - inputs: recent bars, news, indicators, regime, portfolio
+        - tool_outputs: actual data returned by each MCP function
+        - reasoning: the model's CoT
+        - decision: parsed action + quantity + rationale
+        - fill: confirmed execution
+        - latency: perceive-to-act duration
+        """
+        try:
+            from mcp_quant_agent.observability.langfuse_setup import log_decision
+
+            decision = state.get("decision", {})
+            latency_ms = float(decision.get("_latency_ms", 0.0))
+
+            # Capture the last 5 bars and first 3 news for grounding evaluation.
+            # Truncating avoids huge payloads while preserving the key evidence.
+            bars_recent = state["bars"][-5:] if state["bars"] else []
+            news_recent = state["news"][:3] if state["news"] else []
+
+            inputs = {
+                "bars_count": len(state["bars"]),
+                "bars_recent": bars_recent,
+                "news_count": len(state["news"]),
+                "news_recent": news_recent,
+                "indicators": {
+                    k: v for k, v in state.get("indicators", {}).items()
+                    if not k.startswith("_")
+                },
+                "regime": state.get("regime"),
+                "portfolio": state.get("portfolio", {}),
+                "errors": state.get("errors", []),
+            }
+
+            tool_outputs: list[dict[str, Any]] = [
+                {
+                    "tool": "get_price_history",
+                    "bars_returned": len(state["bars"]),
+                    "date_range": (
+                        f"{state['bars'][0]['date']} -- {state['bars'][-1]['date']}"
+                        if state["bars"] else "no data"
+                    ),
+                },
+                {
+                    "tool": "get_news_items",
+                    "items_returned": len(state["news"]),
+                },
+                {
+                    "tool": "compute_indicators",
+                    "keys": list(state.get("indicators", {}).keys()),
+                },
+                {
+                    "tool": "get_current_regime",
+                    "regime": state.get("regime"),
+                },
+            ]
+
+            log_decision(
+                trace_id=f"{state['ticker']}-{state['t_now_str']}",
+                t_now=state["t_now_str"],
+                ticker=state["ticker"],
+                inputs=inputs,
+                tool_outputs=tool_outputs,
+                reasoning=state.get("reasoning", ""),
+                decision=decision,
+                fill=state.get("fill"),
+                latency_ms=latency_ms,
+            )
         except Exception as exc:
             logger.debug("Langfuse logging skipped: %s", exc)
 
