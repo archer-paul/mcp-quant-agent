@@ -33,7 +33,7 @@ Two design choices carry the scientific weight:
    hallucinate numbers?) and **sophistication** (a compact expert rubric). All metrics are
    reported *per market regime* (bull / bear / range / high-vol).
 
-This directly targets the *knowledge–action gap* documented in KellyBench (Salvi et al.):
+This directly targets the *knowledge–action gap* documented in KellyBench (Thomas Grady et al.):
 models articulate good strategies but leak data, fail to adapt to regime shifts, and don't
 execute what they reason. Our harness is built to measure exactly that gap.
 
@@ -42,24 +42,24 @@ execute what they reason. Our harness is built to measure exactly that gap.
 ## Architecture (high level)
 
 ```
-            ┌──────────────────────────────────────────────┐
+            ┌───────────────────────────────────────────────┐
             │     Orchestrator (custom Python loop)         │
             │     perceive → reason → act → observe         │
             │     single-agent now; extensible to roles     │
-            └───────────────┬──────────────────────────────┘
+            └───────────────┬───────────────────────────────┘
                             │  tool calls over MCP
-        ┌───────────────────┼───────────────────────┐
+        ┌───────────────────┼────────────────────────┐
         ▼                   ▼                        ▼
-  MCP data wrappers   MCP analytics            MCP execution
-  (financial-datasets,(indicators, regime,     (place_order,
-   finnhub) + t_now    backtest)                portfolio, pnl)
-   filter                                       paper, in-memory
+  MCP data wrappers     MCP analytics            MCP execution
+  (financial-datasets,  (indicators, regime,     (place_order,
+   finnhub) + t_now     backtest)                portfolio, pnl)
+   filter                                        paper, in-memory
         │
         ▼
-  ┌────────────────────────────────────────────────────────┐
+  ┌──────────────────────────────────────────────────────────┐
   │  Simulation clock t_now drives data exposure. The SAME   │
   │  MCP tools serve backtest and live; only the clock moves.│
-  └────────────────────────────────────────────────────────┘
+  └──────────────────────────────────────────────────────────┘
 
   Observability: Langfuse traces every decision (CoT, tool calls, latency, cost).
 ```

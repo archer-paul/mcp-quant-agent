@@ -14,7 +14,7 @@ Outputs
 - results/baselines_<timestamp>.csv     (human-readable copy)
 
 These baselines are the yardstick against which the agent is evaluated.
-Run them BEFORE evaluating the agent — if the agent cannot beat Buy&Hold
+Run them BEFORE evaluating the agent -- if the agent cannot beat Buy&Hold
 on Sharpe, that is an important and honest result.
 """
 
@@ -24,6 +24,7 @@ import datetime as dt
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -39,19 +40,22 @@ def _format_pct(v: float) -> str:
 
 def _format_float(v: float, decimals: int = 2) -> str:
     if v == float("inf"):
-        return "∞"
+        return "inf"
     return f"{v:.{decimals}f}"
 
 
-def _print_table(results: dict) -> None:
+def _print_table(results: dict[str, Any]) -> None:
     """Print a readable comparison table to stdout."""
-    header = f"{'Strategy':<22} {'Ticker':<8} {'AnnRet':>7} {'Sharpe':>7} {'Sortino':>7} {'Calmar':>7} {'MaxDD':>7} {'HitRate':>8} {'Trades':>7}"
+    header = (
+        f"{'Strategy':<22} {'Ticker':<8} {'AnnRet':>7} {'Sharpe':>7} "
+        f"{'Sortino':>7} {'Calmar':>7} {'MaxDD':>7} {'HitRate':>8} {'Trades':>7}"
+    )
     sep = "-" * len(header)
 
     print()
     print("=" * len(header))
     print(" BASELINE PERFORMANCE SUMMARY")
-    print(f" Period: {results['meta']['start_date']} → {results['meta']['end_date']}")
+    print(f" Period: {results['meta']['start_date']} -> {results['meta']['end_date']}")
     print(f" Universe: {', '.join(results['meta']['tickers'])}")
     print(f" Initial cash: ${results['meta']['initial_cash']:,.0f}/ticker")
     print(
@@ -101,7 +105,10 @@ def _print_table(results: dict) -> None:
             label = strategy_labels.get(strategy, strategy)
             ci_str = ""
             if ci:
-                ci_str = f"  [Sharpe CI: {_format_float(ci['ci_lower'])}–{_format_float(ci['ci_upper'])}]"
+                ci_str = (
+                    f"  [Sharpe CI: {_format_float(ci['ci_lower'])}"
+                    f"-{_format_float(ci['ci_upper'])}]"
+                )
             print(
                 f"{label:<22} {'EQ-WT':<8} "
                 f"{_format_pct(m['annualised_return']):>7} "
@@ -117,7 +124,7 @@ def _print_table(results: dict) -> None:
     print()
 
 
-def _save_results(results: dict, output_dir: Path) -> None:
+def _save_results(results: dict[str, Any], output_dir: Path) -> None:
     """Save results to parquet and CSV."""
     import pandas as pd
 
@@ -202,7 +209,7 @@ def main(
     """
     from mcp_quant_agent.backtest.baselines import run_all_baselines
 
-    typer.echo(f"Running baselines on {universe}, {start} → {end}...")
+    typer.echo(f"Running baselines on {universe}, {start} -> {end}...")
 
     try:
         results = run_all_baselines(
@@ -217,7 +224,7 @@ def main(
         raise typer.Exit(1) from exc
 
     if not results.get("per_ticker"):
-        typer.echo("No results produced — check tickers and date range.", err=True)
+        typer.echo("No results produced -- check tickers and date range.", err=True)
         raise typer.Exit(1)
 
     _print_table(results)
