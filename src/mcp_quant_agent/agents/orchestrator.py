@@ -69,6 +69,9 @@ class AgentState(TypedDict):
     fill: dict[str, Any] | None
     regime: str | None
     errors: list[str]
+    # ── Tracing fields — populated by observe_node, used for decisions.jsonl ──
+    tool_outputs: list[dict[str, Any]]  # actual data returned by each MCP tool
+    latency_ms: float  # LLM reasoning latency
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +564,12 @@ def build_graph(
         except Exception as exc:
             logger.debug("Langfuse logging skipped: %s", exc)
 
-        return {}
+        # Return tool_outputs and latency into state so engine can write
+        # decisions.jsonl with the full schema (avoids re-fetching from Langfuse).
+        return {
+            "tool_outputs": tool_outputs,
+            "latency_ms": latency_ms,
+        }
 
     # ── Assemble graph ────────────────────────────────────────────────────────
     graph_builder: StateGraph = StateGraph(AgentState)  # type: ignore[type-arg]
@@ -612,5 +620,7 @@ def run_single_step(
         "fill": None,
         "regime": None,
         "errors": [],
+        "tool_outputs": [],
+        "latency_ms": 0.0,
     }
     return graph.invoke(initial)  # type: ignore[no-any-return]

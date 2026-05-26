@@ -10,6 +10,15 @@ The orchestrator's data calls (``get_price_history``, ``get_news_items``) all
 go through the clock filter, so the agent can only observe data ≤ the current
 bar date.  This is the structural guarantee.
 
+Output artefacts
+----------------
+Every real (non-stub) run writes two files:
+
+- ``runs/<run_id>/decisions.jsonl`` — one JSON line per decision, complete schema
+  (action, quantity, rationale, tool_outputs, regime, indicators, fill, latency).
+  This is the raw data needed to compute reasoning metrics without re-paying the API.
+- ``results/<run_id>/summary.csv`` — human-readable per-ticker performance table.
+
 Usage (stub backbone — no API key needed)::
 
     from mcp_quant_agent.backtest.engine import BacktestEngine
@@ -35,7 +44,9 @@ Usage (real backbone)::
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -76,6 +87,7 @@ class BacktestEngine:
         model: str = "gpt-4.1-mini",
         use_stub: bool = False,
         use_llm_cache: bool = True,
+        run_id: str | None = None,
     ) -> None:
         self.tickers = tickers
         self.start_date = start_date
@@ -84,6 +96,12 @@ class BacktestEngine:
         self.model = model
         self.use_stub = use_stub
         self.use_llm_cache = use_llm_cache
+        # Run ID: used for output file paths.  Auto-generated if not provided.
+        if run_id is None:
+            backbone_label = "stub" if use_stub else model.replace(".", "-")
+            ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_id = f"{backbone_label}_{ts}"
+        self.run_id = run_id
 
     def run(self) -> dict[str, Any]:
         """Run the full backtest and return performance metrics + equity curve.
@@ -184,6 +202,15 @@ class BacktestEngine:
             for ticker, bars in price_data.items()
         }
 
+        # ── 5b. Set up output paths ───────────────────────────────────────────
+        runs_dir = Path("runs") / self.run_id
+        results_dir = Path("results") / self.run_id
+        if not self.use_stub:
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            results_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = runs_dir / "decisions.jsonl"
+        jsonl_fh = open(jsonl_path, "w", encoding="utf-8") if not self.use_stub else None  # noqa: SIM115
+
         # ── 6. Bar-by-bar loop ────────────────────────────────────────────────
         nav_series: list[float] = []
         decisions_log: list[dict[str, Any]] = []
@@ -217,34 +244,52 @@ class BacktestEngine:
                     "fill": None,
                     "regime": None,
                     "errors": [],
+                    "tool_outputs": [],
+                    "latency_ms": 0.0,
                 }
                 try:
                     result = graph.invoke(initial_state)
                     n_decisions += 1
                     decision = result.get("decision", {})
-                    decisions_log.append(
-                        {
-                            "date": date_str,
-                            "ticker": ticker,
-                            "action": decision.get("action", "hold"),
-                            "quantity": decision.get("quantity", 0),
-                            "fill": result.get("fill"),
-                            "regime": result.get("regime"),
-                            "errors": result.get("errors", []),
-                        }
-                    )
+                    entry: dict[str, Any] = {
+                        "date": date_str,
+                        "ticker": ticker,
+                        "action": decision.get("action", "hold"),
+                        "quantity": decision.get("quantity", 0),
+                        "rationale": decision.get("rationale", ""),
+                        "fill": result.get("fill"),
+                        "regime": result.get("regime"),
+                        "indicators": {
+                            k: v for k, v in result.get("indicators", {}).items()
+                            if not str(k).startswith("_")
+                        },
+                        "tool_outputs": result.get("tool_outputs", []),
+                        "latency_ms": result.get("latency_ms", 0.0),
+                        "errors": result.get("errors", []),
+                    }
+                    decisions_log.append(entry)
+                    if jsonl_fh is not None:
+                        jsonl_fh.write(json.dumps(entry, default=str) + "\n")
+                        jsonl_fh.flush()
                 except Exception as exc:
                     logger.error("Agent error on %s/%s: %s", date_str, ticker, exc)
-                    decisions_log.append(
-                        {
-                            "date": date_str,
-                            "ticker": ticker,
-                            "action": "error",
-                            "quantity": 0,
-                            "fill": None,
-                            "errors": [str(exc)],
-                        }
-                    )
+                    error_entry: dict[str, Any] = {
+                        "date": date_str,
+                        "ticker": ticker,
+                        "action": "error",
+                        "quantity": 0,
+                        "rationale": "",
+                        "fill": None,
+                        "regime": None,
+                        "indicators": {},
+                        "tool_outputs": [],
+                        "latency_ms": 0.0,
+                        "errors": [str(exc)],
+                    }
+                    decisions_log.append(error_entry)
+                    if jsonl_fh is not None:
+                        jsonl_fh.write(json.dumps(error_entry, default=str) + "\n")
+                        jsonl_fh.flush()
 
             # Record NAV (after all tickers for this date)
             current_prices = {
@@ -255,7 +300,12 @@ class BacktestEngine:
             nav = portfolio.record_nav(current_prices, timestamp=date_str)
             nav_series.append(nav)
 
-        # ── 7. Compute metrics ────────────────────────────────────────────────
+        # ── 7. Close decisions.jsonl ──────────────────────────────────────────
+        if jsonl_fh is not None:
+            jsonl_fh.close()
+            logger.info("Decisions written to %s", jsonl_path)
+
+        # ── 8. Compute metrics ────────────────────────────────────────────────
         metrics = compute_all_metrics(nav_series) if len(nav_series) > 1 else {}
         sharpe_ci = bootstrap_sharpe_ci(nav_series) if len(nav_series) > 10 else {}
 
@@ -278,6 +328,17 @@ class BacktestEngine:
             except Exception as exc:
                 logger.debug("Langfuse flush skipped: %s", exc)
 
+        # ── 9. Write summary.csv ──────────────────────────────────────────────
+        if not self.use_stub:
+            self._write_summary_csv(
+                results_dir=results_dir,
+                metrics=metrics,
+                sharpe_ci=sharpe_ci,
+                decisions_log=decisions_log,
+                backbone_label=backbone_label,
+                nav_series=nav_series,
+            )
+
         return {
             "nav_series": nav_series,
             "metrics": metrics,
@@ -288,6 +349,63 @@ class BacktestEngine:
             "start_date": self.start_date,
             "end_date": self.end_date,
             "backbone": backbone_label,
+            "run_id": self.run_id,
             "decisions_log": decisions_log[-20:],  # last 20 for display
+            "decisions_all": decisions_log,  # full list for reasoning eval
             "order_history": portfolio.get_order_history(),
         }
+
+    def _write_summary_csv(
+        self,
+        results_dir: Path,
+        metrics: dict[str, Any],
+        sharpe_ci: dict[str, Any],
+        decisions_log: list[dict[str, Any]],
+        backbone_label: str,
+        nav_series: list[float],
+    ) -> None:
+        """Write a human-readable summary CSV to results/<run_id>/summary.csv."""
+        import csv
+
+        # Per-ticker metrics from decisions_log
+        regime_counts: dict[str, int] = {}
+        action_counts: dict[str, int] = {"buy": 0, "sell": 0, "hold": 0, "error": 0}
+        for d in decisions_log:
+            regime = str(d.get("regime") or "unknown")
+            regime_counts[regime] = regime_counts.get(regime, 0) + 1
+            action = str(d.get("action", "hold"))
+            action_counts[action] = action_counts.get(action, 0) + 1
+
+        rows: list[list[Any]] = [
+            ["run_id", self.run_id],
+            ["backbone", backbone_label],
+            ["tickers", ", ".join(self.tickers)],
+            ["start_date", self.start_date],
+            ["end_date", self.end_date],
+            ["n_bars", len(nav_series)],
+            ["n_decisions", len(decisions_log)],
+            ["final_nav", round(nav_series[-1], 2) if nav_series else 0.0],
+            ["initial_cash", self.initial_cash],
+            ["annualised_return", round(float(metrics.get("annualised_return", 0.0)), 4)],
+            ["sharpe", round(float(metrics.get("sharpe", 0.0)), 4)],
+            ["sharpe_ci_low", round(float(sharpe_ci.get("ci_lower", 0.0)), 4)],
+            ["sharpe_ci_high", round(float(sharpe_ci.get("ci_upper", 0.0)), 4)],
+            ["sortino", round(float(metrics.get("sortino", 0.0)), 4)],
+            ["calmar", round(float(metrics.get("calmar", 0.0)), 4)],
+            ["max_drawdown", round(float(metrics.get("max_drawdown", 0.0)), 4)],
+            ["hit_rate", round(float(metrics.get("hit_rate", 0.0)), 4)],
+            ["actions_buy", action_counts.get("buy", 0)],
+            ["actions_sell", action_counts.get("sell", 0)],
+            ["actions_hold", action_counts.get("hold", 0)],
+            ["actions_error", action_counts.get("error", 0)],
+        ]
+        # Regime distribution
+        for regime, count in sorted(regime_counts.items()):
+            rows.append([f"regime_{regime}_days", count])
+
+        csv_path = results_dir / "summary.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["metric", "value"])
+            writer.writerows(rows)
+        logger.info("Summary written to %s", csv_path)
