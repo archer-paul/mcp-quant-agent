@@ -508,47 +508,87 @@ def build_graph(
             decision = state.get("decision", {})
             latency_ms = float(decision.get("_latency_ms", 0.0))
 
-            # Capture the last 5 bars and first 3 news for grounding evaluation.
-            # Truncating avoids huge payloads while preserving the key evidence.
-            bars_recent = state["bars"][-5:] if state["bars"] else []
-            news_recent = state["news"][:3] if state["news"] else []
+            bars = state.get("bars", [])
+            news = state.get("news", [])
+            indicators = state.get("indicators", {})
+            portfolio_state = state.get("portfolio", {})
 
-            inputs = {
-                "bars_count": len(state["bars"]),
-                "bars_recent": bars_recent,
-                "news_count": len(state["news"]),
-                "news_recent": news_recent,
-                "indicators": {
-                    k: v for k, v in state.get("indicators", {}).items()
-                    if not k.startswith("_")
-                },
-                "regime": state.get("regime"),
-                "portfolio": state.get("portfolio", {}),
-                "errors": state.get("errors", []),
-            }
+            # Compute per-position pct_of_nav for constraint context in the
+            # faithfulness judge (judge must see the 20%-NAV limit).
+            nav = float(portfolio_state.get("nav", 0.0)) or 1.0
+            positions_with_pct = [
+                {
+                    "ticker": p.get("ticker"),
+                    "quantity": p.get("quantity"),
+                    "market_value": round(float(p.get("market_value", 0.0)), 2),
+                    "pct_of_nav": round(float(p.get("market_value", 0.0)) / nav, 4),
+                }
+                for p in portfolio_state.get("positions", [])
+            ]
 
+            # Raw tool outputs — full values needed for grounding + faithfulness.
+            # bars_recent: last 5 OHLCV bars (close price grounding).
+            # compute_indicators: full values dict (RSI, SMA, MACD, ATR…).
+            # get_portfolio: cash, nav, positions with pct_of_nav.
             tool_outputs: list[dict[str, Any]] = [
                 {
                     "tool": "get_price_history",
-                    "bars_returned": len(state["bars"]),
-                    "date_range": (
-                        f"{state['bars'][0]['date']} -- {state['bars'][-1]['date']}"
-                        if state["bars"] else "no data"
-                    ),
+                    "bars_count": len(bars),
+                    "bars_recent": [
+                        {
+                            "date": b["date"],
+                            "open": round(float(b.get("open", 0)), 4),
+                            "high": round(float(b.get("high", 0)), 4),
+                            "low": round(float(b.get("low", 0)), 4),
+                            "close": round(float(b.get("close", 0)), 4),
+                            "volume": int(b.get("volume", 0)),
+                        }
+                        for b in bars[-5:]
+                    ],
                 },
                 {
                     "tool": "get_news_items",
-                    "items_returned": len(state["news"]),
+                    "items_count": len(news),
+                    "items_recent": [
+                        {
+                            "date": n.get("datetime", n.get("date", "")),
+                            "headline": str(
+                                n.get("headline", n.get("title", ""))
+                            )[:120],
+                        }
+                        for n in news[:3]
+                    ],
                 },
                 {
                     "tool": "compute_indicators",
-                    "keys": list(state.get("indicators", {}).keys()),
+                    "values": {
+                        k: round(v, 4) if isinstance(v, float) else v
+                        for k, v in indicators.items()
+                        if v is not None and not str(k).startswith("_")
+                    },
                 },
                 {
                     "tool": "get_current_regime",
                     "regime": state.get("regime"),
                 },
+                {
+                    "tool": "get_portfolio",
+                    "cash": round(float(portfolio_state.get("cash", 0.0)), 2),
+                    "nav": round(float(portfolio_state.get("nav", 0.0)), 2),
+                    "positions": positions_with_pct,
+                },
             ]
+
+            inputs = {
+                "bars_count": len(bars),
+                "indicators": {
+                    k: v for k, v in indicators.items()
+                    if not str(k).startswith("_")
+                },
+                "regime": state.get("regime"),
+                "portfolio": portfolio_state,
+                "errors": state.get("errors", []),
+            }
 
             log_decision(
                 trace_id=f"{state['ticker']}-{state['t_now_str']}",
