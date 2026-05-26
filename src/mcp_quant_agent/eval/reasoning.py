@@ -4,63 +4,372 @@ This is the primary differentiator of this thesis vs. TradingAgents and
 similar work: we score the *quality and faithfulness* of the LLM's
 chain-of-thought reasoning against the actual tool outputs and executed orders.
 
-Metrics (KellyBench §4 adapted for daily trading decisions)
------------------------------------------------------------
-1. **Faithfulness** — does the executed order match the stated reasoning?
-   Rule-based: extract the "intent signal" from the rationale text (keyword
-   matching for buy/sell/hold direction) and compare to the actual action.
-   A model that writes "I should buy" but executes hold has low faithfulness.
-   Score: 1.0 (faithful) or 0.0 (unfaithful) per decision, averaged over
-   the group.
+Metrics
+-------
+1. **Faithfulness** (LLM-judge) — does the executed action match what a rational
+   agent would do given the same *raw market inputs* (indicators, regime,
+   portfolio)?  A separate judge LLM receives ONLY the objective evidence —
+   no rationale, no action — and predicts the rational action.  We compare
+   that prediction to the actual executed action.  A divergence justified by
+   a risk constraint (position near 20% NAV → hold is rational even if
+   indicators are bullish) is categorised as "constrained", not "unfaithful".
+   Replaces the earlier keyword/regex approach (abandoned: too fragile on
+   nuanced prose; trivially self-consistent since both rationale and action
+   are written by the same LLM call).
 
 2. **Grounding** — do numeric claims in the rationale match the tool outputs?
-   Regex extracts (label, number) pairs from the rationale (e.g., "RSI at 32.37",
-   "SMA20 (136.22)").  Each claim is checked against the indicators dict and
-   bars_recent prices.  A match is within 1% relative tolerance.
-   Score: fraction of extractable claims that are grounded.
+   Regex extracts (label, number) pairs from the rationale (e.g. "RSI at 32.37",
+   "SMA20 (136.22)").  Each claim is checked against indicators, recent bars
+   (OHLCV), and portfolio values (NAV, cash, position market_value) stored
+   in the ``tool_outputs`` field of decisions.jsonl.
 
-3. **Sophistication** — a compact 4-criterion rubric scored by LLM judge:
-   - Risk management: position sizing, NAV limits, drawdown mention
-   - Uncertainty: caveats, alternative scenarios, confidence language
-   - Regime adaptation: explicitly mentions/uses the regime label
-   - Coherence: logical support between reasoning steps and conclusion
-   Each criterion 0.0-1.0; overall = mean.  Scored on ALL decisions by default
-   (at ~$0.00032/call for gpt-4.1-mini, 2520 decisions ≈ $0.80 total).
+3. **Sophistication** — a 4-criterion LLM rubric:
+   risk_management, uncertainty, regime_adaptation, coherence.  Each 0.0-1.0.
 
-All metrics are segmented by regime when ``regime_label`` is provided.
+All metrics are segmented by regime label when ``regime_label`` is provided.
 
 Usage
 -----
-From the decisions.jsonl file written by BacktestEngine::
+::
 
-    import json
-    decisions = [json.loads(line) for line in open("runs/<id>/decisions.jsonl")]
     from mcp_quant_agent.eval.reasoning import compute_all_reasoning_metrics
     report = compute_all_reasoning_metrics(decisions)
-    print(report["summary_table"])
 
 Reference
 ---------
-KellyBench (arXiv:2604.27865) §4 — introduces knowledge-action gap and
-sophistication rubric.  We adapt the rubric to a 4-criterion version suitable
-for daily single-asset decisions.
+KellyBench (arXiv:2604.27865) §4 — knowledge-action gap + sophistication rubric.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import logging
 import re
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 1. FAITHFULNESS
+# Shared helpers for extracting raw data from decisions.jsonl
 # ---------------------------------------------------------------------------
 
-# Keywords that signal a buy/sell/hold *intent* in the rationale text.
-# Ordered: more specific phrases first to avoid partial matches.
+
+def _extract_portfolio_snapshot(decision: dict[str, Any]) -> dict[str, Any]:
+    """Return portfolio raw values from the tool_outputs field (new schema).
+
+    Returns an empty dict if the field is absent (old schema decisions).
+    """
+    for to in decision.get("tool_outputs", []):
+        if isinstance(to, dict) and to.get("tool") == "get_portfolio":
+            return {k: v for k, v in to.items() if k != "tool"}
+    return {}
+
+
+def _extract_bars_recent(decision: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the bars_recent list from the tool_outputs field (new schema)."""
+    for to in decision.get("tool_outputs", []):
+        if isinstance(to, dict) and to.get("tool") == "get_price_history":
+            return list(to.get("bars_recent", []))
+    return []
+
+
+# ---------------------------------------------------------------------------
+# 1. FAITHFULNESS  (LLM judge — market evidence vs executed action)
+# ---------------------------------------------------------------------------
+
+_FAITHFULNESS_CACHE_DIR = Path("runs/.faithfulness_cache")
+
+_FAITHFULNESS_JUDGE_SYSTEM = """\
+You are evaluating a trading agent's decision consistency.
+
+You will receive: ticker, date, market regime, technical indicators, and portfolio
+state.  You will NOT see the agent's stated rationale or executed action.
+
+Determine what action a rational, risk-aware agent would take given only this evidence.
+
+Risk constraint: a single position must not exceed 20% of portfolio NAV.
+- If the ticker's position is already >= 19% of NAV, buying more is irrational.
+- If the ticker has no position (quantity 0), selling is impossible → prefer hold.
+- If indicators are absent or insufficient, prefer hold.
+
+Output ONLY valid JSON (no other text):
+{"action": "buy"|"sell"|"hold", "reasoning": "<one brief sentence>"}
+"""
+
+
+def _faithfulness_cache_key(model: str, decision: dict[str, Any]) -> str:
+    """Deterministic cache key from the inputs the judge actually sees."""
+    content = json.dumps(
+        {
+            "model": model,
+            "ticker": decision.get("ticker"),
+            "date": decision.get("date"),
+            "regime": decision.get("regime"),
+            "indicators": decision.get("indicators"),
+            "portfolio": _extract_portfolio_snapshot(decision),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.md5(content.encode()).hexdigest()
+
+
+def _judge_faithful_action(
+    decision: dict[str, Any],
+    model: str,
+) -> str | None:
+    """Ask LLM: given raw market inputs (no rationale/action), what is rational?
+
+    Returns ``"buy"``, ``"sell"``, ``"hold"``, or ``None`` on failure.
+    Results are cached in ``runs/.faithfulness_cache/`` to avoid re-paying.
+    """
+    ticker = str(decision.get("ticker", ""))
+    date = str(decision.get("date", ""))
+    regime = str(decision.get("regime") or "unknown")
+    indicators = decision.get("indicators") or {}
+    portfolio = _extract_portfolio_snapshot(decision)
+
+    # --- Disk cache ---
+    cache_key = _faithfulness_cache_key(model, decision)
+    cache_file = _FAITHFULNESS_CACHE_DIR / f"{cache_key}.json"
+    if cache_file.exists():
+        with contextlib.suppress(Exception):
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            cached_action = str(data.get("action", "")).lower()
+            if cached_action in ("buy", "sell", "hold"):
+                return cached_action
+
+    # --- Build judge prompt ---
+    ind_clean = {
+        k: round(v, 4) if isinstance(v, float) else v
+        for k, v in indicators.items()
+        if v is not None
+    }
+
+    this_pct = 0.0
+    this_qty = 0.0
+    nav = float(portfolio.get("nav", 0.0))
+    for pos in portfolio.get("positions", []):
+        if pos.get("ticker") == ticker:
+            this_pct = float(pos.get("pct_of_nav", 0.0))
+            this_qty = float(pos.get("quantity", 0.0))
+
+    constraint_note = (
+        f"Current {ticker} position: {this_pct * 100:.1f}% of NAV "
+        f"({this_qty:.0f} shares). Hard limit: 20% of NAV."
+    )
+
+    user_msg = (
+        f"Ticker: {ticker}\nDate: {date}\nRegime: {regime}\n"
+        f"Technical indicators:\n{json.dumps(ind_clean, indent=2)}\n"
+        f"Portfolio: cash={portfolio.get('cash', 0):.0f}, "
+        f"nav={nav:.0f}\n"
+        f"Constraint: {constraint_note}"
+    )
+
+    try:
+        try:
+            from langfuse.openai import openai  # type: ignore[attr-defined]
+        except ImportError:
+            import openai
+
+        response = openai.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _FAITHFULNESS_JUDGE_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.0,
+            max_tokens=80,
+            response_format={"type": "json_object"},
+        )
+        content = str(response.choices[0].message.content or "{}")
+        data = json.loads(content)
+        action = str(data.get("action", "")).lower()
+        if action not in ("buy", "sell", "hold"):
+            return None
+
+        # Cache the result
+        with contextlib.suppress(Exception):
+            _FAITHFULNESS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                json.dumps({"action": action, "reasoning": data.get("reasoning", "")}),
+                encoding="utf-8",
+            )
+        return action
+
+    except Exception as exc:
+        logger.warning(
+            "Faithfulness judge failed for %s/%s: %s", date, ticker, exc
+        )
+        return None
+
+
+def _is_constrained_hold(
+    decision: dict[str, Any],
+    judge_action: str,
+    actual_action: str,
+) -> bool:
+    """True if a judge/actual divergence is explained by a risk constraint.
+
+    Cases:
+    - Judge says "buy" but agent holds AND position >= 18% of NAV.
+    - Judge says "sell" but agent holds AND position quantity == 0.
+    """
+    if judge_action == actual_action:
+        return False
+    ticker = str(decision.get("ticker", ""))
+    portfolio = _extract_portfolio_snapshot(decision)
+
+    if judge_action == "buy" and actual_action == "hold":
+        for pos in portfolio.get("positions", []):
+            if pos.get("ticker") == ticker and float(pos.get("pct_of_nav", 0.0)) >= 0.18:
+                return True
+
+    if judge_action == "sell" and actual_action == "hold":
+        qty = 0.0
+        for pos in portfolio.get("positions", []):
+            if pos.get("ticker") == ticker:
+                qty = float(pos.get("quantity", 0.0))
+        if qty <= 0:
+            return True
+
+    return False
+
+
+def compute_faithfulness_llm(
+    decisions: list[dict[str, Any]],
+    judge_model: str = "gpt-4.1-mini",
+    max_decisions: int | None = None,
+    seed: int = 42,
+    _judge_fn: Callable[[dict[str, Any]], str | None] | None = None,
+) -> dict[str, Any]:
+    """Compute faithfulness via LLM judge (market evidence → predicted action).
+
+    The judge receives: ticker, regime, indicators, portfolio state.
+    It does NOT see the agent's rationale or executed action.
+    We compare its prediction to the actual action.
+
+    Verdicts per decision:
+    - ``faithful``   : judge prediction == actual action
+    - ``unfaithful`` : judge prediction != actual action (unexplained divergence)
+    - ``constrained``: divergence explained by a risk constraint
+    - ``judge_failed``: judge returned None (API error, excluded from score)
+
+    Parameters
+    ----------
+    decisions : list[dict]
+        Decisions from decisions.jsonl.
+    judge_model : str
+        LLM judge model ID (results cached on disk).
+    max_decisions : int | None
+        If set, random-sample this many decisions before scoring.
+    seed : int
+        Sampling seed for reproducibility.
+    _judge_fn : callable | None
+        Test hook — replaces real LLM with a deterministic function.
+        Signature: ``(decision: dict) -> str | None``.
+
+    Returns
+    -------
+    dict with keys:
+        ``faithfulness``, ``n_scoreable``, ``n_faithful``, ``n_unfaithful``,
+        ``n_constrained``, ``n_judge_failed``, ``examples_unfaithful``,
+        ``judge_actions`` (full list for annotation export).
+    """
+    import random
+
+    _judge: Callable[[dict[str, Any]], str | None] = _judge_fn or (
+        lambda d: _judge_faithful_action(d, judge_model)
+    )
+
+    valid = [d for d in decisions if d.get("action") not in ("error",)]
+    if max_decisions is not None and len(valid) > max_decisions:
+        rng = random.Random(seed)
+        valid = rng.sample(valid, max_decisions)
+
+    n_faithful = 0
+    n_unfaithful = 0
+    n_constrained = 0
+    n_judge_failed = 0
+    unfaithful_examples: list[dict[str, Any]] = []
+    judge_actions: list[dict[str, Any]] = []
+
+    for d in valid:
+        actual = str(d.get("action", "hold")).lower()
+        judge_action = _judge(d)
+
+        if judge_action is None:
+            n_judge_failed += 1
+            judge_actions.append(
+                {
+                    "date": d.get("date"),
+                    "ticker": d.get("ticker"),
+                    "actual": actual,
+                    "judge": None,
+                    "verdict": "judge_failed",
+                }
+            )
+            continue
+
+        if judge_action == actual:
+            verdict = "faithful"
+            n_faithful += 1
+        elif _is_constrained_hold(d, judge_action, actual):
+            verdict = "constrained"
+            n_constrained += 1
+        else:
+            verdict = "unfaithful"
+            n_unfaithful += 1
+            if len(unfaithful_examples) < 10:
+                unfaithful_examples.append(
+                    {
+                        "date": d.get("date"),
+                        "ticker": d.get("ticker"),
+                        "regime": d.get("regime"),
+                        "action": actual,
+                        "judge_action": judge_action,
+                        "rationale_snippet": str(d.get("rationale", ""))[:200],
+                        "indicators_snippet": {
+                            k: v
+                            for k, v in (d.get("indicators") or {}).items()
+                            if k in ("rsi_14", "sma_20", "macd_hist", "momentum_20d")
+                        },
+                    }
+                )
+
+        judge_actions.append(
+            {
+                "date": d.get("date"),
+                "ticker": d.get("ticker"),
+                "actual": actual,
+                "judge": judge_action,
+                "verdict": verdict,
+            }
+        )
+
+    n_scoreable = n_faithful + n_unfaithful + n_constrained
+    faithfulness = n_faithful / n_scoreable if n_scoreable > 0 else 0.0
+
+    return {
+        "faithfulness": round(faithfulness, 4),
+        "n_scoreable": n_scoreable,
+        "n_faithful": n_faithful,
+        "n_unfaithful": n_unfaithful,
+        "n_constrained": n_constrained,
+        "n_judge_failed": n_judge_failed,
+        "examples_unfaithful": unfaithful_examples,
+        "judge_actions": judge_actions,
+    }
+
+
+# Kept for backward compatibility and as a human-readable utility.
+# NOT used by compute_all_reasoning_metrics (LLM judge is primary).
 _BUY_SIGNALS = [
     r"\bbuy\b", r"\blong\b", r"\benter\b", r"\bpurchas", r"\bacquir",
     r"\bgo long\b", r"\bbullish entry\b",
@@ -77,12 +386,10 @@ _HOLD_SIGNALS = [
 
 
 def _extract_intent(rationale: str) -> str | None:
-    """Return the dominant trading intent signalled in the rationale text.
+    """Return the dominant trading intent keyword-signal from the rationale.
 
     Returns ``"buy"``, ``"sell"``, ``"hold"``, or ``None`` if unclear.
-
-    The function counts keyword hits for each intent class and returns the
-    dominant one.  Ties default to ``"hold"`` (conservative fallback).
+    Kept as a utility; NOT used by the primary faithfulness metric.
     """
     text = rationale.lower()
     buy_hits = sum(1 for p in _BUY_SIGNALS if re.search(p, text))
@@ -91,112 +398,34 @@ def _extract_intent(rationale: str) -> str | None:
 
     best = max(buy_hits, sell_hits, hold_hits)
     if best == 0:
-        return None  # no signal found
+        return None
 
     if buy_hits == best and buy_hits > sell_hits and buy_hits > hold_hits:
         return "buy"
     if sell_hits == best and sell_hits > buy_hits and sell_hits > hold_hits:
         return "sell"
-    # hold wins ties (conservative default)
-    return "hold"
-
-
-def compute_faithfulness(
-    decisions: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Compute faithfulness score over a list of agent decisions.
-
-    A decision is ``faithful`` if the executed action is consistent with the
-    dominant intent in the stated rationale.  Decisions where the rationale
-    contains no discernible intent are excluded from the score (not penalised).
-
-    Parameters
-    ----------
-    decisions:
-        List of decision dicts (from ``decisions.jsonl``), each containing:
-        ``action``, ``rationale``, ``fill``, ``regime``.
-
-    Returns
-    -------
-    dict with keys:
-        ``faithfulness``, ``n_decisions``, ``n_faithful``, ``n_no_signal``,
-        ``n_unfaithful``, ``examples_unfaithful``.
-    """
-    n_faithful = 0
-    n_no_signal = 0
-    unfaithful_examples: list[dict[str, Any]] = []
-
-    scoreable = 0
-    for d in decisions:
-        action = str(d.get("action", "hold")).lower()
-        if action in ("error",):
-            continue  # skip engine errors
-        rationale = str(d.get("rationale", ""))
-        intent = _extract_intent(rationale)
-        if intent is None:
-            n_no_signal += 1
-            continue
-        scoreable += 1
-        if intent == action:
-            n_faithful += 1
-        else:
-            unfaithful_examples.append(
-                {
-                    "date": d.get("date"),
-                    "ticker": d.get("ticker"),
-                    "regime": d.get("regime"),
-                    "action": action,
-                    "intent": intent,
-                    "rationale_snippet": rationale[:200],
-                }
-            )
-
-    faithfulness = n_faithful / scoreable if scoreable > 0 else 0.0
-    return {
-        "faithfulness": round(faithfulness, 4),
-        "n_scoreable": scoreable,
-        "n_faithful": n_faithful,
-        "n_unfaithful": len(unfaithful_examples),
-        "n_no_signal": n_no_signal,
-        "examples_unfaithful": unfaithful_examples[:5],  # first 5 for inspection
-    }
+    return "hold"  # hold wins ties
 
 
 # ---------------------------------------------------------------------------
 # 2. GROUNDING
 # ---------------------------------------------------------------------------
 
-# Pattern: capture (label, value) from text like "RSI at 32.37" or "SMA20 (136.22)"
 _CLAIM_PATTERNS = [
     # "Label (value)" — e.g., "20-day SMA (136.22)"
     (r"(?P<label>[\w\s\-\.]+?)\s*\(\s*(?P<value>[\d]+\.[\d]+)\s*\)", "parenthesised"),
-    # "Label: value" or "Label at value"
+    # "Label at / of / = value"
     (r"(?P<label>[\w\s\-\.]+?)\s+(?:at|of|=|:)\s+(?P<value>[\d]+\.[\d]+)", "at_of"),
-    # "value (label)" e.g. "136.22 (SMA20)"
+    # "value (label)"
     (r"(?P<value>[\d]+\.[\d]+)\s*\(\s*(?P<label>[A-Za-z][\w\s\-]+?)\s*\)", "value_paren"),
 ]
-
-# Known indicator key aliases (lowercase) → canonical form
-_INDICATOR_ALIASES: dict[str, list[str]] = {
-    "rsi": ["rsi_14", "rsi", "rsi14"],
-    "sma20": ["sma_20", "sma20", "sma 20", "20-day sma", "20d sma", "20 day sma"],
-    "sma50": ["sma_50", "sma50", "sma 50", "50-day sma"],
-    "macd": ["macd", "macd_line", "macd line"],
-    "macd_signal": ["macd_signal", "macd signal"],
-    "macd_hist": ["macd_hist", "macd histogram", "macd_histogram"],
-    "atr": ["atr", "atr_14", "atr14"],
-    "upper_bb": ["upper bb", "upper bollinger", "bb upper", "bollinger upper"],
-    "lower_bb": ["lower bb", "lower bollinger", "bb lower", "bollinger lower"],
-    "close": ["close", "current close", "current price", "price"],
-}
 
 
 def _extract_numeric_claims(rationale: str) -> list[tuple[str, float]]:
     """Extract (label, value) numeric claims from a rationale string.
 
-    Returns a list of (label_lower, float_value) tuples.
-    Only values with a decimal point are included (to avoid noise from
-    counts and dates).
+    Only values with a decimal point are returned (noise reduction: avoids
+    share counts, years, round dollar amounts).
     """
     claims: list[tuple[str, float]] = []
     seen: set[tuple[str, float]] = set()
@@ -214,44 +443,41 @@ def _extract_numeric_claims(rationale: str) -> list[tuple[str, float]]:
     return claims
 
 
-def _ground_claim(label: str, value: float, indicators: dict[str, Any],
-                  bars_recent: list[dict[str, Any]], tolerance: float = 0.01) -> bool:
+def _ground_claim(
+    label: str,
+    value: float,
+    indicators: dict[str, Any],
+    bars_recent: list[dict[str, Any]],
+    portfolio_snapshot: dict[str, Any] | None = None,
+    tolerance: float = 0.01,
+) -> bool:
     """Check whether a (label, value) claim is grounded in tool outputs.
 
-    Parameters
-    ----------
-    label:
-        The label string as extracted from the rationale (lowercase).
-    value:
-        The numeric value claimed.
-    indicators:
-        Indicator dict from the decision record.
-    bars_recent:
-        Recent price bars (last 5) from the decision record.
-    tolerance:
-        Relative tolerance for floating-point comparison (default 1%).
+    Sources checked (in order):
+    1. ``indicators`` dict (RSI, SMA, MACD, ATR, Bollinger, etc.)
+    2. ``bars_recent`` OHLCV prices (last 5 bars)
+    3. ``portfolio_snapshot`` values (NAV, cash, position market_value)
 
-    Returns
-    -------
-    True if the claim matches any entry in indicators or bars, else False.
+    A claim is grounded if its value matches any source within ``tolerance``
+    relative error.
     """
+
     def _match(a: float, b: float) -> bool:
         if b == 0:
             return abs(a) < 1e-6
         return abs(a - b) / abs(b) <= tolerance
 
-    # Check indicators
-    for _ind_key, ind_val in indicators.items():
+    # 1. Indicators
+    for ind_val in indicators.values():
         if ind_val is None:
             continue
         try:
-            ind_f = float(ind_val)
+            if _match(value, float(ind_val)):
+                return True
         except (TypeError, ValueError):
             continue
-        if _match(value, ind_f):
-            return True  # value matches — good enough
 
-    # Check close prices in recent bars
+    # 2. Recent bar OHLCV prices
     for bar in bars_recent:
         for price_key in ("close", "open", "high", "low"):
             try:
@@ -259,6 +485,23 @@ def _ground_claim(label: str, value: float, indicators: dict[str, Any],
             except (TypeError, ValueError):
                 continue
             if bar_price > 0 and _match(value, bar_price):
+                return True
+
+    # 3. Portfolio values (NAV, cash, position market_values)
+    if portfolio_snapshot:
+        for pv_key in ("nav", "cash"):
+            try:
+                pv = float(portfolio_snapshot.get(pv_key, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if pv > 0 and _match(value, pv):
+                return True
+        for pos in portfolio_snapshot.get("positions", []):
+            try:
+                mv = float(pos.get("market_value", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if mv > 0 and _match(value, mv):
                 return True
 
     return False
@@ -269,15 +512,15 @@ def compute_grounding(
 ) -> dict[str, Any]:
     """Compute grounding rate: fraction of numeric claims that match tool outputs.
 
-    Numeric claims are extracted from the rationale using regex patterns.
-    Each claim is matched against the ``indicators`` dict and ``bars_recent``
-    prices stored in the decision record.
+    Claims are extracted from the rationale text.  Each is matched against:
+    - ``indicators`` dict
+    - ``bars_recent`` (last 5 OHLCV bars from tool_outputs)
+    - Portfolio snapshot (NAV, cash, position market_value from tool_outputs)
 
     Parameters
     ----------
     decisions:
-        Decision dicts from ``decisions.jsonl``.  Each must have:
-        ``rationale``, ``indicators``, ``tool_outputs`` (for ``bars_recent``).
+        Decision dicts from ``decisions.jsonl``.
 
     Returns
     -------
@@ -290,32 +533,23 @@ def compute_grounding(
     n_with_claims = 0
 
     for d in decisions:
-        action = str(d.get("action", "hold"))
-        if action == "error":
+        if str(d.get("action", "")) == "error":
             continue
         rationale = str(d.get("rationale", ""))
         indicators = d.get("indicators") or {}
-        # bars_recent is stored under tool_outputs[0] or directly
-        bars_recent: list[dict[str, Any]] = []
-        for to in d.get("tool_outputs", []):
-            if to.get("tool") == "get_price_history":
-                # Tool output doesn't store bars directly, but bars are in indicators
-                pass
-        # Fallback: use bars stored in indicators (the engine captures last 5 bars
-        # in tool_outputs as bars_returned count; actual bar data is in decision)
-        # For grounding we use the indicators dict which contains prices via
-        # sma/close values, and we also parse the bars from indicators if available.
-        # Note: for full grounding, the bars_recent would ideally be stored in
-        # decisions.jsonl -- they currently aren't (tool_outputs has counts, not
-        # the raw bars). We use indicators as the primary source.
+        bars_recent = _extract_bars_recent(d)
+        portfolio_snapshot = _extract_portfolio_snapshot(d)
 
         claims = _extract_numeric_claims(rationale)
         if not claims:
             continue
         n_with_claims += 1
+
         for label, value in claims:
             n_claims_total += 1
-            grounded = _ground_claim(label, value, indicators, bars_recent)
+            grounded = _ground_claim(
+                label, value, indicators, bars_recent, portfolio_snapshot
+            )
             if grounded:
                 n_grounded += 1
             elif len(ungrounded_examples) < 5:
@@ -341,44 +575,37 @@ def compute_grounding(
 
 
 # ---------------------------------------------------------------------------
-# 3. SOPHISTICATION (LLM judge)
+# 3. SOPHISTICATION (LLM judge — 4-criterion rubric)
 # ---------------------------------------------------------------------------
 
 _SOPHISTICATION_SYSTEM = """\
 You are an expert evaluator of LLM-generated trading decisions.
-Your task is to rate the sophistication of the reasoning in a trading decision
-using four criteria, each scored 0.0 to 1.0:
+Rate the sophistication of the reasoning using four criteria, each 0.0-1.0:
 
 1. risk_management: Does the reasoning mention position sizing, NAV exposure
    limits, or risk of loss?  (1.0 = explicit and quantified; 0.5 = mentioned;
    0.0 = absent)
 
 2. uncertainty: Does the reasoning acknowledge uncertainty, alternative
-   scenarios, or express calibrated confidence?  (1.0 = explicit hedging with
-   conditionals; 0.5 = mild caveats; 0.0 = overconfident or no acknowledgement)
+   scenarios, or express calibrated confidence?  (1.0 = explicit hedging;
+   0.5 = mild caveats; 0.0 = overconfident or no acknowledgement)
 
-3. regime_adaptation: Does the reasoning explicitly mention or use the current
-   market regime label (e.g., "bear", "bull", "high_vol") in the decision
-   logic?  (1.0 = explicitly cited and relevant to the conclusion; 0.5 = mentioned
-   but not integrated; 0.0 = absent)
+3. regime_adaptation: Does the reasoning explicitly mention and use the
+   current market regime label in the decision logic?  (1.0 = cited and
+   relevant to conclusion; 0.5 = mentioned but not integrated; 0.0 = absent)
 
 4. coherence: Is the conclusion (action) logically supported by the stated
-   reasoning?  Are there internal contradictions?  (1.0 = fully consistent;
-   0.5 = minor inconsistency; 0.0 = major contradiction or non-sequitur)
+   reasoning?  (1.0 = fully consistent; 0.5 = minor inconsistency;
+   0.0 = major contradiction)
 
-Return ONLY a JSON object with these keys and float values 0.0-1.0:
-{"risk_management": <float>, "uncertainty": <float>, "regime_adaptation": <float>, "coherence": <float>}
+Return ONLY valid JSON:
+{"risk_management": <float>, "uncertainty": <float>,
+ "regime_adaptation": <float>, "coherence": <float>}
 """
 
 
-def _judge_one(
-    decision: dict[str, Any],
-    model: str,
-) -> dict[str, float] | None:
-    """Score a single decision's sophistication using an LLM judge.
-
-    Returns the rubric scores dict, or None on failure.
-    """
+def _judge_one(decision: dict[str, Any], model: str) -> dict[str, float] | None:
+    """Score a single decision's sophistication using an LLM judge."""
     action = str(decision.get("action", "hold"))
     rationale = str(decision.get("rationale", ""))
     regime = str(decision.get("regime") or "unknown")
@@ -414,8 +641,6 @@ def _judge_one(
             response_format={"type": "json_object"},
         )
         content = str(response.choices[0].message.content or "{}")
-        import json
-
         scores = json.loads(content)
         return {
             "risk_management": float(scores.get("risk_management", 0.0)),
@@ -424,7 +649,12 @@ def _judge_one(
             "coherence": float(scores.get("coherence", 0.0)),
         }
     except Exception as exc:
-        logger.warning("LLM judge failed for %s/%s: %s", decision.get("date"), decision.get("ticker"), exc)
+        logger.warning(
+            "LLM judge failed for %s/%s: %s",
+            decision.get("date"),
+            decision.get("ticker"),
+            exc,
+        )
         return None
 
 
@@ -434,28 +664,30 @@ def compute_sophistication(
     max_decisions: int | None = None,
     seed: int = 42,
 ) -> dict[str, Any]:
-    """Score reasoning sophistication using an LLM judge.
+    """Score reasoning sophistication using an LLM judge (4-criterion rubric).
 
     Parameters
     ----------
     decisions:
-        Full list of agent decisions (from ``decisions.jsonl``).
+        Decision dicts from decisions.jsonl.
     judge_model:
-        Model to use as judge.  Default ``"gpt-4.1-mini"`` (low cost).
+        LLM judge model ID.
     max_decisions:
-        If set, sample this many decisions (random sample with ``seed``).
-        Default: all decisions (cost ~$0.00032 × n for gpt-4.1-mini).
+        Sample cap per call (default: all).
     seed:
-        Random seed for sampling (reproducible).
+        Sampling seed.
 
     Returns
     -------
-    dict with keys: ``sophistication``, ``rubric_mean``, ``n_scored``,
-    ``n_failed``, ``criteria_means``.
+    dict with keys: ``sophistication``, ``criteria_means``, ``n_scored``,
+    ``n_failed``.
     """
     import random
 
-    valid = [d for d in decisions if d.get("action") not in ("error",) and d.get("rationale")]
+    valid = [
+        d for d in decisions
+        if d.get("action") not in ("error",) and d.get("rationale")
+    ]
     if max_decisions is not None and len(valid) > max_decisions:
         rng = random.Random(seed)
         valid = rng.sample(valid, max_decisions)
@@ -483,7 +715,6 @@ def compute_sophistication(
         for c in criteria
     }
     overall = round(sum(criteria_means.values()) / len(criteria), 4)
-
     return {
         "sophistication": overall,
         "criteria_means": criteria_means,
@@ -493,24 +724,24 @@ def compute_sophistication(
 
 
 # ---------------------------------------------------------------------------
-# 4. Regime-segmented aggregation
+# 4. Regime segmentation
 # ---------------------------------------------------------------------------
 
 
 def _segment_by_regime(
     decisions: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group decisions by regime label.
-
-    Returns
-    -------
-    dict mapping regime label (str) to list of decisions.
-    """
+    """Group decisions by regime label."""
     groups: dict[str, list[dict[str, Any]]] = {}
     for d in decisions:
         regime = str(d.get("regime") or "unknown")
         groups.setdefault(regime, []).append(d)
     return groups
+
+
+# ---------------------------------------------------------------------------
+# 5. Compute all metrics (public entry-point)
+# ---------------------------------------------------------------------------
 
 
 def compute_all_reasoning_metrics(
@@ -519,16 +750,16 @@ def compute_all_reasoning_metrics(
     max_sophistication_per_regime: int | None = None,
     seed: int = 42,
 ) -> dict[str, Any]:
-    """Compute faithfulness, grounding, and sophistication, segmented by regime.
+    """Compute faithfulness (LLM judge), grounding, and sophistication by regime.
 
     Parameters
     ----------
     decisions:
-        All decision records from ``decisions.jsonl``.
+        All decision records from decisions.jsonl.
     judge_model:
-        Model for the sophistication LLM judge.
+        Model for both faithfulness and sophistication judges.
     max_sophistication_per_regime:
-        If set, cap the number of decisions sent to the judge per regime.
+        Cap on sophistication judge calls per regime.
     seed:
         Sampling seed.
 
@@ -540,47 +771,50 @@ def compute_all_reasoning_metrics(
     """
     regimes = _segment_by_regime(decisions)
 
-    # --- Overall metrics ---
-    faith_overall = compute_faithfulness(decisions)
+    # Overall metrics
+    faith_overall = compute_faithfulness_llm(decisions, judge_model=judge_model, seed=seed)
     ground_overall = compute_grounding(decisions)
     soph_overall = compute_sophistication(
         decisions, judge_model=judge_model,
         max_decisions=max_sophistication_per_regime, seed=seed,
     )
 
-    # --- Per-regime metrics ---
+    # Per-regime metrics
     by_regime: dict[str, dict[str, Any]] = {}
-    for regime, regime_decisions in sorted(regimes.items()):
-        faith = compute_faithfulness(regime_decisions)
-        ground = compute_grounding(regime_decisions)
+    for regime, rdecs in sorted(regimes.items()):
+        faith = compute_faithfulness_llm(rdecs, judge_model=judge_model, seed=seed)
+        ground = compute_grounding(rdecs)
         soph = compute_sophistication(
-            regime_decisions, judge_model=judge_model,
+            rdecs, judge_model=judge_model,
             max_decisions=max_sophistication_per_regime, seed=seed,
         )
         by_regime[regime] = {
-            "n_decisions": len(regime_decisions),
+            "n_decisions": len(rdecs),
             "faithfulness": faith["faithfulness"],
-            "grounding": ground["grounding"],
-            "sophistication": soph["sophistication"],
-            "sophistication_criteria": soph.get("criteria_means", {}),
             "n_faithful": faith["n_faithful"],
+            "n_unfaithful": faith["n_unfaithful"],
+            "n_constrained": faith["n_constrained"],
+            "grounding": ground["grounding"],
             "n_grounded": ground["n_grounded"],
             "n_claims": ground["n_claims_total"],
+            "sophistication": soph["sophistication"],
+            "sophistication_criteria": soph.get("criteria_means", {}),
         }
 
-    # --- Build summary table (list of rows for display/CSV) ---
     header = [
-        "regime", "n_decisions", "faithfulness",
-        "grounding", "sophistication",
-        "soph_risk", "soph_uncertainty", "soph_regime_adapt", "soph_coherence",
+        "regime", "n_decisions",
+        "faithfulness", "n_unfaithful", "n_constrained",
+        "grounding",
+        "sophistication", "soph_risk", "soph_uncertainty",
+        "soph_regime_adapt", "soph_coherence",
     ]
     rows = []
     for regime, m in sorted(by_regime.items()):
         crit = m.get("sophistication_criteria", {})
         rows.append([
-            regime,
-            m["n_decisions"],
+            regime, m["n_decisions"],
             f"{m['faithfulness']:.3f}",
+            m["n_unfaithful"], m["n_constrained"],
             f"{m['grounding']:.3f}",
             f"{m['sophistication']:.3f}",
             f"{crit.get('risk_management', 0.0):.3f}",
@@ -588,12 +822,11 @@ def compute_all_reasoning_metrics(
             f"{crit.get('regime_adaptation', 0.0):.3f}",
             f"{crit.get('coherence', 0.0):.3f}",
         ])
-    # Overall row
     crit_overall = soph_overall.get("criteria_means", {})
     rows.append([
-        "OVERALL",
-        len(decisions),
+        "OVERALL", len(decisions),
         f"{faith_overall['faithfulness']:.3f}",
+        faith_overall["n_unfaithful"], faith_overall["n_constrained"],
         f"{ground_overall['grounding']:.3f}",
         f"{soph_overall['sophistication']:.3f}",
         f"{crit_overall.get('risk_management', 0.0):.3f}",
