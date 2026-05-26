@@ -1,5 +1,31 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Async LLM parallelisation in the backtest engine
+- **Context:** The thesis run (5 tickers × 501 bars = 2505 decisions) is serialised by
+  sequential OpenAI round-trips (~1 s each).  Wall time ~42 min serial; multi-seed and
+  multi-agent runs would be proportionally worse.  Concurrency is pure I/O; there is no
+  computation benefit.
+- **Decision:** ``asyncio.gather`` all LLM calls *within a bar-date* (bounded by
+  ``Semaphore(concurrency=15)`` to stay within the OpenAI rate limit for gpt-4.1-mini).
+  All tickers on a date receive the **same start-of-date portfolio snapshot** (computed
+  once before any orders via ``portfolio.get_portfolio_summary()``), so all decisions are
+  made against a consistent, order-independent portfolio context.  Orders are then executed
+  serially in deterministic ``self.tickers`` order after all LLM results arrive.
+  ``decisions.jsonl`` is sorted by ``(date, ticker)`` at the end — byte-for-byte
+  reproducible across runs.  ``run()`` is a thin sync wrapper over ``asyncio.run(_run_async_body())``.
+- **Non-regression guarantee:** ``TestAsyncEqualSerial`` (``tests/test_async_backtest.py``)
+  runs serial (``concurrency=1``) and async (``concurrency=10``) on a 10-bar/2-ticker stub
+  window and asserts identical action, quantity, and rationale for every decision.  This
+  test must stay green before any engine change.
+- **Cache thread-safety:** ``_save_cache()`` in ``orchestrator.py`` uses ``temp → os.replace``
+  (atomic on Windows within the same filesystem).  Concurrent goroutines writing the same key
+  produce identical payloads; the last writer wins harmlessly.
+- **Back-off:** ``_call_openai_async()`` retries on ``RateLimitError`` (HTTP 429) with
+  exponential back-off capped at 32 s per attempt, up to 6 attempts.
+- **Consequence:** Estimated wall time ~3-5 min for the thesis run (down from ~42 min serial),
+  depending on cache hit rate.  Multi-seed runs (3 seeds) become practical at ~10-15 min.
+  The serial==async invariant means cached results are interchangeable.
+
 ### 2026-05 — Faithfulness metric: LLM judge replacing keyword/regex (ÉTAPE 2 fix)
 - **Context:** The original faithfulness metric compared ``_extract_intent(rationale)`` to
   the executed ``action``.  Both fields are written by the same LLM call (one JSON response
