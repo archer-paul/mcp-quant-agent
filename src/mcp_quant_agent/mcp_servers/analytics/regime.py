@@ -182,6 +182,77 @@ def label_regimes(
 # ---------------------------------------------------------------------------
 
 
+def _apply_min_hold_smoothing(
+    raw_labels: list[str | None],
+    min_hold: int,
+) -> list[str | None]:
+    """Apply causal minimum-hold smoothing to a raw regime label sequence.
+
+    A regime change is only confirmed after the new label has appeared for
+    ``min_hold`` consecutive non-None bars.  This suppresses single-bar and
+    brief noise excursions (which account for ~30-36% of all regime runs on
+    AAPL/MSFT/NVDA 2022-2024).
+
+    Fully causal: ``smoothed[t]`` depends only on ``raw[0..t]``.
+    The anti-lookahead guarantee is preserved: adding future bars does NOT
+    change any past smoothed label.
+
+    Parameters
+    ----------
+    raw_labels:
+        Unsmoothed labels, ``None`` for warm-up bars with insufficient history.
+    min_hold:
+        Minimum number of consecutive non-None bars the new label must hold
+        before being adopted (default 3 in ``label_regimes_v2``).
+
+    Returns
+    -------
+    list[str | None]
+        Same length as ``raw_labels``.  None entries are preserved.
+
+    Examples
+    --------
+    >>> _apply_min_hold_smoothing(["bull"]*5 + ["bear"] + ["bull"]*5, min_hold=3)
+    ['bull', 'bull', 'bull', 'bull', 'bull', 'bull', 'bull', 'bull', 'bull', 'bull', 'bull']
+    """
+    n = len(raw_labels)
+    smoothed: list[str | None] = [None] * n
+    confirmed: str | None = None  # the currently confirmed (smoothed) label
+
+    for i in range(n):
+        label = raw_labels[i]
+        if label is None:
+            smoothed[i] = None
+            continue
+
+        if confirmed is None:
+            # Bootstrap: first non-None label is adopted immediately.
+            confirmed = label
+            smoothed[i] = confirmed
+            continue
+
+        if label == confirmed:
+            smoothed[i] = confirmed
+        else:
+            # Check if `label` has held for `min_hold` consecutive non-None bars.
+            # Walk backward from i through non-None labels.
+            consecutive = 0
+            j = i
+            while j >= 0 and consecutive < min_hold:
+                if raw_labels[j] is None:
+                    break  # gap in data — don't cross warm-up boundary
+                if raw_labels[j] == label:
+                    consecutive += 1
+                    j -= 1
+                else:
+                    break
+            if consecutive >= min_hold:
+                confirmed = label
+            smoothed[i] = confirmed
+
+    return smoothed
+
+
 def label_regimes_v2(
     rows: list[dict[str, Any]],
     vol_window: int = 20,
@@ -191,6 +262,7 @@ def label_regimes_v2(
     high_vol_pct: float = 0.80,
     bull_threshold: float = 0.02,
     bear_threshold: float = -0.02,
+    min_hold: int = 3,
 ) -> list[dict[str, Any]]:
     """Improved regime detector -- reactive short-term trend + causal vol threshold.
 
@@ -225,19 +297,26 @@ def label_regimes_v2(
         Percentile for HIGH_VOL threshold (default 0.80).
     bull_threshold, bear_threshold:
         Short-term momentum thresholds (+2% / -2%).
+    min_hold:
+        Causal minimum-hold smoothing window (default 3).  A regime change is
+        only confirmed after ``min_hold`` consecutive bars show the new label.
+        This suppresses single-bar and 2-bar noise excursions (~30-36% of runs
+        on AAPL/MSFT/NVDA 2022-2024).  Pass ``min_hold=1`` to disable.
 
     Returns
     -------
     list[dict[str, Any]]
         One dict per bar: ``date``, ``close``, ``rolling_vol_ann``,
         ``vol_threshold_trailing``, ``trend_short_20d``, ``trend_long_60d``,
-        ``regime`` (None if insufficient lookback).
+        ``regime_raw`` (unsmoothed), ``regime`` (smoothed, or raw if min_hold=1).
+        ``regime`` is None for warm-up bars with insufficient lookback.
 
     Structural guarantee
     --------------------
     ``label_regimes_v2(rows[:t])[-1]["regime"]
     == label_regimes_v2(rows)[t-1]["regime"]``
-    for all t.  See ``TestRegimeLookAheadGuard`` for the formal test.
+    for all t, for any ``min_hold``.  See ``TestRegimeLookAheadGuard`` for the
+    formal test.  The smoothing function is also causal by construction.
 
     Examples
     --------
@@ -303,28 +382,41 @@ def label_regimes_v2(
         else:
             momentum_long.append(closes[i] / closes[i - trend_long] - 1.0)
 
-    # ── Step 6: assign regime (priority: HIGH_VOL > BULL > BEAR > RANGE) ─────
+    # ── Step 6: assign raw regime (priority: HIGH_VOL > BULL > BEAR > RANGE) ──
+    raw_regimes: list[str | None] = []
+    for i in range(n):
+        vol = rolling_vol[i]
+        mom_s = momentum_short[i]
+        vt = vol_thresholds[i]
+
+        if vol is None or mom_s is None:
+            raw_regime: str | None = None
+        elif vol > vt:
+            # Strictly greater than the trailing percentile threshold.
+            # Using > (not >=) so that a bar exactly AT the threshold is not
+            # labelled HIGH_VOL (avoids all-HIGH_VOL in constant-vol series).
+            raw_regime = Regime.HIGH_VOL.value
+        elif mom_s >= bull_threshold:
+            raw_regime = Regime.BULL.value
+        elif mom_s <= bear_threshold:
+            raw_regime = Regime.BEAR.value
+        else:
+            raw_regime = Regime.RANGE.value
+        raw_regimes.append(raw_regime)
+
+    # ── Step 7: apply causal min-hold smoothing (if requested) ───────────────
+    final_regimes = (
+        _apply_min_hold_smoothing(raw_regimes, min_hold)
+        if min_hold > 1
+        else raw_regimes
+    )
+
     result: list[dict[str, Any]] = []
     for i in range(n):
         vol = rolling_vol[i]
         mom_s = momentum_short[i]
         mom_l = momentum_long[i]
         vt = vol_thresholds[i]
-
-        if vol is None or mom_s is None:
-            regime: str | None = None
-        elif vol > vt:
-            # Strictly greater than the trailing percentile threshold.
-            # Using > (not >=) so that a bar exactly AT the threshold is not
-            # labelled HIGH_VOL (avoids all-HIGH_VOL in constant-vol series).
-            regime = Regime.HIGH_VOL.value
-        elif mom_s >= bull_threshold:
-            regime = Regime.BULL.value
-        elif mom_s <= bear_threshold:
-            regime = Regime.BEAR.value
-        else:
-            regime = Regime.RANGE.value
-
         result.append(
             {
                 "date": rows[i]["date"],
@@ -332,8 +424,11 @@ def label_regimes_v2(
                 "rolling_vol_ann": round(vol, 6) if vol is not None else None,
                 "vol_threshold_trailing": round(vt, 6) if vt != float("inf") else None,
                 "trend_short_20d": round(mom_s, 6) if mom_s is not None else None,
-                "trend_long_60d": round(mom_l, 6) if mom_l is not None else None,
-                "regime": regime,
+                "trend_long_60d": (
+                    round(momentum_long[i], 6) if mom_l is not None else None  # type: ignore[arg-type]
+                ),
+                "regime_raw": raw_regimes[i],  # unsmoothed, for diagnostics
+                "regime": final_regimes[i],
             }
         )
     return result

@@ -12,9 +12,11 @@ This test FAILS if ``label_regimes_v2`` uses a full-series vol percentile
 from __future__ import annotations
 
 import datetime as dt
+from typing import cast
 
 from mcp_quant_agent.mcp_servers.analytics.regime import (
     Regime,
+    _apply_min_hold_smoothing,
     get_current_regime,
     label_regimes,
     label_regimes_v2,
@@ -346,6 +348,102 @@ class TestGetCurrentRegime:
         regime_v1 = get_current_regime(rows, version="v1")
         valid = {r.value for r in Regime} | {None}
         assert regime_v1 in valid
+
+
+# ---------------------------------------------------------------------------
+# 5. Min-hold smoothing tests
+# ---------------------------------------------------------------------------
+
+
+class TestMinHoldSmoothing:
+    """Tests for _apply_min_hold_smoothing and label_regimes_v2 min_hold."""
+
+    def test_single_bar_spike_suppressed(self) -> None:
+        """A 1-bar excursion (bull then single bear then bull) is swallowed."""
+        raw = cast(list[str | None], ["bull"] * 10 + ["bear"] + ["bull"] * 10)
+        smoothed = _apply_min_hold_smoothing(raw, min_hold=3)
+        # The bear at position 10 and the 2 bulls before 3 bulls of bull
+        # should be smoothed to bull — never confirmed because bear lasted 1 bar
+        assert smoothed[10] == "bull", f"Expected bull, got {smoothed[10]}"
+        assert smoothed[11] == "bull"
+
+    def test_two_bar_spike_suppressed(self) -> None:
+        """A 2-bar regime excursion is suppressed with min_hold=3."""
+        raw = cast(list[str | None], ["bull"] * 10 + ["bear", "bear"] + ["bull"] * 10)
+        smoothed = _apply_min_hold_smoothing(raw, min_hold=3)
+        # bear appears twice but not 3 times consecutively → not confirmed
+        assert all(s == "bull" for s in smoothed[10:12])
+
+    def test_three_bar_run_confirmed(self) -> None:
+        """A 3-bar run of a new label IS confirmed with min_hold=3."""
+        raw = cast(list[str | None], ["bull"] * 10 + ["bear"] * 4 + ["bull"] * 10)
+        smoothed = _apply_min_hold_smoothing(raw, min_hold=3)
+        # bear runs for 4 bars → confirmed at bar 12 (index of 3rd bear)
+        assert smoothed[12] == "bear"
+        assert smoothed[13] == "bear"
+        # Once confirmed, switching back to bull also needs min_hold bars
+        # (10 bulls at the end → confirmed)
+        assert smoothed[-1] == "bull"
+
+    def test_none_passthrough(self) -> None:
+        """None (warm-up) entries pass through unchanged."""
+        raw: list[str | None] = [None, None, "bull", "bull", "bull", "bear"]
+        smoothed = _apply_min_hold_smoothing(raw, min_hold=3)
+        assert smoothed[0] is None
+        assert smoothed[1] is None
+        # bear at position 5 is only 1 bar, stays bull
+        assert smoothed[5] == "bull"
+
+    def test_min_hold_1_is_identity(self) -> None:
+        """min_hold=1 is equivalent to no smoothing."""
+        raw: list[str | None] = [None, None, "bull", "bear", "bull", "range"]
+        smoothed = _apply_min_hold_smoothing(raw, min_hold=1)
+        assert smoothed == raw
+
+    def test_smoothing_causal_with_future_extreme(self) -> None:
+        """Adding future bars does NOT change smoothed labels for past bars."""
+        base_rows = _make_rows(100, daily_return=0.003)
+        extreme_future = _make_volatile_rows(60, start_idx=100, amplitude=0.20)
+
+        base_labeled = label_regimes_v2(base_rows, min_hold=3)
+        ext_labeled = label_regimes_v2(base_rows + extreme_future, min_hold=3)
+
+        for i in range(len(base_rows)):
+            assert base_labeled[i]["regime"] == ext_labeled[i]["regime"], (
+                f"SMOOTHED LOOK-AHEAD at bar {i}: "
+                f"base={base_labeled[i]['regime']!r}, ext={ext_labeled[i]['regime']!r}"
+            )
+
+    def test_min_hold_reduces_run_count(self) -> None:
+        """Smoothed series has fewer runs than the raw series."""
+        rows = _make_rows(200, daily_return=0.002)
+        labeled_raw = label_regimes_v2(rows, min_hold=1)
+        labeled_smooth = label_regimes_v2(rows, min_hold=3)
+
+        raw_regimes = [r["regime"] for r in labeled_raw if r["regime"] is not None]
+        smooth_regimes = [r["regime"] for r in labeled_smooth if r["regime"] is not None]
+
+        def count_runs(seq: list[str]) -> int:
+            return sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1]) + 1
+
+        raw_runs = count_runs(raw_regimes)
+        smooth_runs = count_runs(smooth_regimes)
+        # Smoothed should have fewer or equal runs
+        assert smooth_runs <= raw_runs, (
+            f"Smoothing increased run count: raw={raw_runs}, smooth={smooth_runs}"
+        )
+
+    def test_regime_raw_field_preserved(self) -> None:
+        """The 'regime_raw' field should match min_hold=1 labels."""
+        rows = _make_rows(100, daily_return=0.003)
+        smoothed = label_regimes_v2(rows, min_hold=3)
+        raw = label_regimes_v2(rows, min_hold=1)
+
+        for i in range(len(rows)):
+            assert smoothed[i]["regime_raw"] == raw[i]["regime"], (
+                f"regime_raw mismatch at bar {i}: "
+                f"{smoothed[i]['regime_raw']!r} vs {raw[i]['regime']!r}"
+            )
 
     def test_version_v2_default(self) -> None:
         """Default version should be v2."""

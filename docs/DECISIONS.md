@@ -1,5 +1,22 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Regime label stability: causal min-hold smoothing (default min_hold=3)
+- **Context:** Diagnostic on AAPL/MSFT/NVDA 2022-2024 with 20d-trend v2 detector: 29-36%
+  of regime runs last only 1 bar (single-day "spike"), 41-56% last ≤ 2 bars.  Thesis
+  metrics are segmented by regime; with 30% of runs being 1-day episodes the segmentation
+  becomes meaningless (every decision is in its own micro-regime).
+- **Decision:** Add causal ``min_hold`` smoothing to ``label_regimes_v2``: a regime change
+  is only confirmed after the new raw label has appeared for ``min_hold`` consecutive bars.
+  Default ``min_hold=3`` (one trading week).  ``min_hold=1`` disables smoothing (identity).
+  Implementation: ``_apply_min_hold_smoothing(raw_labels, min_hold)`` is O(n), fully causal
+  (``smoothed[t]`` depends only on ``raw[0..t]``).  The raw label is preserved as
+  ``regime_raw`` in the output dict for transparency.
+  Test ``TestMinHoldSmoothing.test_smoothing_causal_with_future_extreme`` verifies the
+  anti-lookahead guarantee with smoothing enabled.
+- **Consequence:** Regime transitions are ~3× less frequent; longer regime episodes that
+  are meaningful for segmentation.  K-day lag in detecting genuine transitions is the
+  accepted trade-off.  Documented in the thesis as a design choice (not a flaw).
+
 ### 2026-05 — Regime detector v2: reactive 20d trend + causal vol threshold (default)
 - **Context:** v1 used a 60-day trend window.  The 2022–2023 recovery was systematically
   delayed in v1's labels: the 60d lookback at the start of 2023 still reached into the
