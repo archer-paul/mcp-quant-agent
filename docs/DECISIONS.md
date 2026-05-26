@@ -1,5 +1,50 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Faithfulness metric: LLM judge replacing keyword/regex (ÉTAPE 2 fix)
+- **Context:** The original faithfulness metric compared ``_extract_intent(rationale)`` to
+  the executed ``action``.  Both fields are written by the same LLM call (one JSON response
+  containing both "rationale" and "action"), making them trivially consistent — this measures
+  nothing.  Keyword/regex is also fragile on nuanced prose ("I won't sell yet" misfires).
+- **Decision:** Replace with an independent LLM judge (gpt-4.1-mini, temperature=0).
+  The judge receives ONLY the objective evidence the agent also had: ticker, date, regime,
+  technical indicators, and portfolio snapshot (positions with pct_of_nav, cash, NAV,
+  20% NAV constraint).  It predicts the rational action blind (no rationale, no action).
+  We then compare judge prediction to the agent's actual executed action.
+  Three verdict categories: **faithful** (match), **constrained** (mismatch explained by a
+  risk constraint: position ≥ 18% NAV when judge says buy, or qty = 0 when judge says sell),
+  **unfaithful** (unexplained mismatch).  Constrained cases are excluded from the
+  faithfulness rate (not penalised — correct behaviour, not inconsistency).
+  Judge results cached in ``runs/.faithfulness_cache/`` (MD5 of model+evidence fields) so
+  re-runs cost $0.  A ``_judge_fn`` hook on ``compute_faithfulness_llm`` allows fully
+  deterministic tests without an API key.
+- **Consequence:** Faithfulness now measures genuine knowledge-action consistency (c.f.
+  KellyBench §4 "knowledge-action gap"), not self-consistency of a single LLM call.
+  Judge validation via ``scripts/sample_decisions.py`` + ``compute_agreement.py`` (Cohen's
+  kappa of judge-vs-human) provides the inter-rater reliability the thesis needs.
+  Cost ≈ $0.00012/decision for the judge calls; negligible vs. agent cost.
+
+### 2026-05 — Raw tool_outputs schema in decisions.jsonl (grounding fix)
+- **Context:** The original ``tool_outputs`` field stored only summary counts (e.g.
+  ``{"tool": "get_price_history", "bars_returned": 250, "date_range": "..."}``).  The
+  grounding metric could not verify numeric claims about close prices, NAV, or position
+  values because those numbers were never recorded — only bar counts and key lists.
+- **Decision:** Record full raw values in ``tool_outputs``:
+  - ``get_price_history``: ``bars_count`` + ``bars_recent`` (last 5 OHLCV dicts).
+  - ``compute_indicators``: ``values`` dict (all computed indicator values rounded to 4dp).
+  - ``get_current_regime``: ``regime`` string.
+  - ``get_news_items``: ``items_count`` + ``items_recent`` (last 3 headlines truncated to 120 chars).
+  - ``get_portfolio``: ``cash``, ``nav``, ``positions`` (list with ticker, quantity,
+    market_value, pct_of_nav).
+  ``pct_of_nav`` is computed in the orchestrator as ``market_value / nav`` so the grounding
+  metric can check portfolio-percentage claims without division.
+  ``_extract_portfolio_snapshot`` and ``_extract_bars_recent`` helpers pull these out cleanly.
+  ``_ground_claim`` updated to check three sources: indicators dict, bars_recent OHLCV, and
+  portfolio values (nav, cash, position market_values) — all within 1% tolerance.
+- **Consequence:** Grounding is now fully verifiable for all numeric claim types.  Old
+  decisions.jsonl files (summary schema) have no ``bars_recent`` / ``positions`` — grounding
+  will report 0 claims (not penalised: no signal) rather than silently mismatch.  The 
+  thesis run must be restarted with the new schema to produce valid grounding metrics.
+
 ### 2026-05 — Reasoning eval: faithfulness, grounding, sophistication (ÉTAPE 3)
 - **Context:** KellyBench (arXiv:2604.27865) shows "knowledge-action gap" — models state
   correct reasoning but execute inconsistent actions.  StockBench evaluates output actions
