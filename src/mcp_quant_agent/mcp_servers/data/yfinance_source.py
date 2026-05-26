@@ -30,6 +30,10 @@ import pandas as pd
 import yfinance as yf
 
 from mcp_quant_agent.clock import get_clock
+from mcp_quant_agent.mcp_servers.data.bar_validation import (
+    _to_float_scalar,
+    validate_bar,
+)
 from mcp_quant_agent.mcp_servers.data.cache import PriceCache
 
 logger = logging.getLogger(__name__)
@@ -104,6 +108,13 @@ def _fetch_raw_bars(
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)  # noqa: PD011
 
+    # De-duplicate column names that can arise after MultiIndex flattening
+    # (e.g. yfinance returning 'Close' twice for different price types).
+    # Keeping only the first occurrence ensures row["Close"] is a scalar,
+    # not a Series — the root cause of the run #1 price-data bug.
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated(keep="first")]
+
     df = df.reset_index()
     bars: list[dict[str, Any]] = []
     for _, row in df.iterrows():
@@ -116,21 +127,20 @@ def _fetch_raw_bars(
         else:
             date_str = str(date_val)[:10]
 
-        # Defensive: skip rows where essential columns are NaN
-        try:
-            bars.append(
-                {
-                    "date": date_str,
-                    "open": round(float(row["Open"]), 4),
-                    "high": round(float(row["High"]), 4),
-                    "low": round(float(row["Low"]), 4),
-                    "close": round(float(row["Close"]), 4),
-                    "volume": int(row["Volume"]),
-                }
-            )
-        except (ValueError, TypeError) as exc:
-            logger.warning("Skipping malformed bar for %s on %s: %s", ticker, date_str, exc)
-            continue
+        # Fail loud: _to_float_scalar raises on Series/NaN/non-finite.
+        # Never silently skip a malformed bar — a skipped bar creates a
+        # stale-data position with no diagnostic.  If this raises, the
+        # yfinance format has changed and needs investigation.
+        bar: dict[str, Any] = {
+            "date": date_str,
+            "open":   round(_to_float_scalar(row["Open"],   "open",   ticker, date_str), 4),
+            "high":   round(_to_float_scalar(row["High"],   "high",   ticker, date_str), 4),
+            "low":    round(_to_float_scalar(row["Low"],    "low",    ticker, date_str), 4),
+            "close":  round(_to_float_scalar(row["Close"],  "close",  ticker, date_str), 4),
+            "volume": int(max(0, _to_float_scalar(row["Volume"], "volume", ticker, date_str))),
+        }
+        validate_bar(bar, ticker)  # raises ValueError on OHLC inconsistency or spike
+        bars.append(bar)
 
     return bars
 
@@ -198,6 +208,12 @@ def get_price_history(
         bars = [b for b in bars if str(b["date"]) >= start_date]
     else:
         bars = _fetch_raw_bars(ticker, start_date, end_date, interval)
+
+    # Validate bars read from cache — guards against data written by older
+    # code before the bar validation layer existed (e.g. run #1 corrupt cache).
+    # Raises ValueError if any bar fails; delete the parquet cache and re-fetch.
+    for b in bars:
+        validate_bar(b, ticker)
 
     # THE anti-look-ahead filter: strip any bar beyond t_now
     return clock.filter_rows(bars, date_key="date")

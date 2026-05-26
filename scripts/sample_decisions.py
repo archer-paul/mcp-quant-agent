@@ -245,7 +245,7 @@ def main(
         writer = csv.DictWriter(cf, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(sample_rows)
-    typer.echo(f"  CSV  → {csv_path}")
+    typer.echo(f"  CSV  -> {csv_path}")
 
     # Markdown (human-readable)
     md_path = out_dir / "annotation_sample.md"
@@ -285,7 +285,7 @@ def main(
                     "| notes | |\n\n"
                 )
 
-    typer.echo(f"  MD   → {md_path}")
+    typer.echo(f"  MD   -> {md_path}")
     typer.echo()
     typer.echo(
         "Next step: annotate the markdown/CSV, then run:\n"

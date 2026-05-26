@@ -1,5 +1,52 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Run #1 post-mortem: yfinance Series→scalar bug + max_tokens truncation
+
+**Run:** `gpt-4-1-mini_20260526_160051` (2022-07-01→2024-06-30, AAPL/MSFT/NVDA/JPM/XOM).
+FinalNAV = $126 (−99.9%), MaxDD = 99.95%.  **This run is invalid for thesis use.**
+
+**Root cause 1 — yfinance price-data corruption:**
+`yfinance` returns a MultiIndex DataFrame for single-ticker downloads in recent versions.
+After `df.columns = df.columns.get_level_values(0)`, duplicate column names can arise.
+Accessing `row["Close"]` on a row with duplicate "Close" columns returns a `pd.Series`
+instead of a scalar.  The previous code caught `TypeError` and *silently skipped* the bar
+with only a `logger.warning`.  Some bars were accepted with wrong scalar values extracted
+from the head of a multi-element Series (e.g. AAPL close=372 instead of ~$195 in Dec 2023),
+producing absurd buy signals and catastrophic NAV collapse.
+
+**Root cause 2 — max_tokens=512 too small:**
+The agent's chain-of-thought JSON response was truncating mid-JSON for verbose rationales.
+3 parse failures observed; could have silently degraded reasoning quality for many more.
+
+**Why it was not caught:**
+- Anti-look-ahead tests guard the *temporal* dimension perfectly.
+- There were **no tests on data values** — the "forteresse" only checked *when*, not *what*.
+- The `except (ValueError, TypeError)` handler masked the bug as warnings in a 42-minute run.
+
+**Fixes applied (2026-05-27):**
+1. `bar_validation.py` — new module with `_to_float_scalar` + `validate_bar`.
+   `_to_float_scalar` raises on multi-element Series, NaN, Inf, or non-convertible types.
+   `validate_bar` checks: close/open/high/low > 0; high ≥ low; high ≥ close ≥ low;
+   close ∈ [open×0.5, open×2] (anti-spike); volume ≥ 0.  Any violation raises `ValueError`
+   with ticker, date, field name, and bad value — **fail loud**.
+2. `yfinance_source.py` — de-duplicate columns after MultiIndex flatten before `iterrows`;
+   replace the silent-skip `except` handler with `_to_float_scalar` calls that propagate;
+   call `validate_bar` on every constructed bar (write path) and on every bar returned from
+   the parquet cache (read path).  Old corrupt caches are caught on first backtest access.
+3. `orchestrator.py` — `max_tokens` 512 → 1024 in both `_call_openai_async` and
+   `OpenAIBackbone.decide`.
+4. Tests: `test_bar_validation.py` — 26 tests covering all violation types, including the
+   exact run #1 failure mode (multi-element Series) and the cache-read regression guard.
+
+**Cache invalidation:** delete `data/cache/prices/*.parquet` before re-running to force a
+fresh fetch with the new validation.  Any previously cached corrupt bars will be detected
+and rejected on the first read, prompting manual cache deletion.
+
+**Reasoning metrics from run #1 are still valid:** the LLM judge saw only regime + indicators
+(not absolute prices), so faithfulness=0.674, grounding=0.999 are unaffected by the price bug.
+
+---
+
 ### 2026-05 — Async LLM parallelisation in the backtest engine
 - **Context:** The thesis run (5 tickers × 501 bars = 2505 decisions) is serialised by
   sequential OpenAI round-trips (~1 s each).  Wall time ~42 min serial; multi-seed and
