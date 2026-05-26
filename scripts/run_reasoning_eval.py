@@ -90,39 +90,47 @@ def main(
 
     # Compute metrics
     if no_sophistication:
-        # Compute faithfulness + grounding only, skip LLM judge
+        # Faithfulness (LLM judge, cached) + grounding; skip sophistication judge
         from mcp_quant_agent.eval.reasoning import (
             _segment_by_regime,
-            compute_faithfulness,
+            compute_faithfulness_llm,
             compute_grounding,
         )
 
         regimes = _segment_by_regime(decisions)
-        faith_all = compute_faithfulness(decisions)
+        faith_all = compute_faithfulness_llm(decisions, judge_model=judge_model, seed=seed)
         ground_all = compute_grounding(decisions)
 
-        header = ["regime", "n_decisions", "faithfulness", "grounding"]
+        header = ["regime", "n_decisions", "faithfulness", "n_unfaithful",
+                  "n_constrained", "grounding"]
         rows: list[list[Any]] = []
         for regime, rd in sorted(regimes.items()):
-            faith = compute_faithfulness(rd)
+            faith = compute_faithfulness_llm(rd, judge_model=judge_model, seed=seed)
             grnd = compute_grounding(rd)
-            rows.append([regime, len(rd), f"{faith['faithfulness']:.3f}", f"{grnd['grounding']:.3f}"])
+            rows.append([
+                regime, len(rd),
+                f"{faith['faithfulness']:.3f}",
+                faith["n_unfaithful"], faith["n_constrained"],
+                f"{grnd['grounding']:.3f}",
+            ])
         rows.append([
             "OVERALL", len(decisions),
             f"{faith_all['faithfulness']:.3f}",
+            faith_all["n_unfaithful"], faith_all["n_constrained"],
             f"{ground_all['grounding']:.3f}",
         ])
 
-        typer.echo("=" * 60)
-        typer.echo(" REASONING METRICS (faithfulness + grounding)")
-        typer.echo("=" * 60)
+        typer.echo("=" * 70)
+        typer.echo(" REASONING METRICS (faithfulness LLM judge + grounding)")
+        typer.echo("=" * 70)
         _print_table(header, rows)
         typer.echo()
-        typer.echo("  Faithfulness detail:")
+        typer.echo("  Faithfulness detail (LLM judge):")
         typer.echo(f"    n_scoreable  : {faith_all['n_scoreable']}")
         typer.echo(f"    n_faithful   : {faith_all['n_faithful']}")
         typer.echo(f"    n_unfaithful : {faith_all['n_unfaithful']}")
-        typer.echo(f"    n_no_signal  : {faith_all['n_no_signal']}")
+        typer.echo(f"    n_constrained: {faith_all['n_constrained']}")
+        typer.echo(f"    n_judge_fail : {faith_all['n_judge_failed']}")
         typer.echo()
         typer.echo("  Grounding detail:")
         typer.echo(f"    n_claims     : {ground_all['n_claims_total']}")
@@ -162,14 +170,17 @@ def main(
     fd = report["faithfulness_detail"]
     gd = report["grounding_detail"]
     sd = report["sophistication_detail"]
-    typer.echo("  Faithfulness detail:")
-    typer.echo(f"    n_scoreable={fd['n_scoreable']}, n_faithful={fd['n_faithful']}, "
-               f"n_unfaithful={fd['n_unfaithful']}, n_no_signal={fd['n_no_signal']}")
+    typer.echo("  Faithfulness detail (LLM judge):")
+    typer.echo(f"    n_scoreable  : {fd['n_scoreable']}")
+    typer.echo(f"    n_faithful   : {fd['n_faithful']}")
+    typer.echo(f"    n_unfaithful : {fd['n_unfaithful']}")
+    typer.echo(f"    n_constrained: {fd['n_constrained']}")
+    typer.echo(f"    n_judge_fail : {fd['n_judge_failed']}")
     if fd.get("examples_unfaithful"):
         typer.echo("    Unfaithful examples (first 3):")
         for ex in fd["examples_unfaithful"][:3]:
             typer.echo(f"      {ex['date']} {ex['ticker']} [{ex['regime']}]: "
-                       f"action={ex['action']}, intent={ex['intent']}")
+                       f"action={ex['action']}, judge={ex['judge_action']}")
             typer.echo(f"        '{ex['rationale_snippet'][:120]}'")
     typer.echo()
     typer.echo("  Grounding detail:")
@@ -201,6 +212,7 @@ def main(
     typer.echo(f"  Saved to {csv_path}")
 
     # Push to Langfuse (best-effort)
+    # Use judge_actions from the faithfulness result (already computed above).
     try:
         from mcp_quant_agent.observability.langfuse_setup import (
             _is_langfuse_configured,
@@ -210,29 +222,24 @@ def main(
         _is_langfuse_configured()
         client = get_langfuse_client()
         if client is not None:
-            # Push as dataset-level scores using the trace for each decision
             pushed = 0
-            for d in decisions:
-                if d.get("action") == "error":
+            for ja in fd.get("judge_actions", []):
+                verdict = ja.get("verdict", "")
+                if verdict not in ("faithful", "unfaithful", "constrained"):
                     continue
-                # Push faithfulness intent signal (1.0/0.0 or None)
-                faith_score: float | None = None
-                from mcp_quant_agent.eval.reasoning import _extract_intent
-
-                intent = _extract_intent(str(d.get("rationale", "")))
-                if intent is not None:
-                    faith_score = 1.0 if intent == d.get("action") else 0.0
-
-                if faith_score is not None:
-                    try:
-                        client.score_current_trace(
-                            name="faithfulness",
-                            value=faith_score,
-                            comment=f"intent={intent}, action={d.get('action')}",
-                        )
-                        pushed += 1
-                    except Exception:
-                        pass
+                faith_score: float = 1.0 if verdict == "faithful" else 0.0
+                try:
+                    client.score_current_trace(
+                        name="faithfulness",
+                        value=faith_score,
+                        comment=(
+                            f"judge={ja.get('judge')}, actual={ja.get('actual')}, "
+                            f"verdict={verdict}"
+                        ),
+                    )
+                    pushed += 1
+                except Exception:
+                    pass
             typer.echo(f"  Pushed {pushed} Langfuse faithfulness scores.")
     except Exception as exc:
         typer.echo(f"  Langfuse push skipped: {exc}")
