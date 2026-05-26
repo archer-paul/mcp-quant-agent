@@ -43,11 +43,12 @@ Usage (real backbone)::
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class BacktestEngine:
         use_stub: bool = False,
         use_llm_cache: bool = True,
         run_id: str | None = None,
+        concurrency: int = 15,
     ) -> None:
         self.tickers = tickers
         self.start_date = start_date
@@ -96,6 +98,7 @@ class BacktestEngine:
         self.model = model
         self.use_stub = use_stub
         self.use_llm_cache = use_llm_cache
+        self.concurrency = concurrency
         # Run ID: used for output file paths.  Auto-generated if not provided.
         if run_id is None:
             backbone_label = "stub" if use_stub else model.replace(".", "-")
@@ -106,18 +109,18 @@ class BacktestEngine:
     def run(self) -> dict[str, Any]:
         """Run the full backtest and return performance metrics + equity curve.
 
-        Steps
-        -----
-        1. Validate API key (fail loud if needed).
-        2. Set simulation clock to ``start_date``.
-        3. Pre-fetch and cache all price data for the full period.
-        4. Build the LangGraph orchestrator.
-        5. For each trading date in [start_date, end_date]:
-           a. ``clock.advance_to(date)``
-           b. Run one ``graph.invoke`` per ticker.
-           c. Record NAV via ``portfolio.record_nav(current_prices)``.
-        6. Compute performance metrics.
-        7. Return results dict.
+        Internally calls ``asyncio.run(_run_async_body())`` so that LLM calls
+        within each bar-date are dispatched concurrently (bounded by
+        ``self.concurrency``).  The public interface is unchanged — callers
+        see a synchronous method returning a dict.
+
+        Determinism guarantee
+        ---------------------
+        All tickers within a date receive an identical **start-of-date portfolio
+        snapshot** (computed before any orders are placed).  Orders are then
+        executed in a fixed ticker order (``self.tickers`` order) after all
+        decisions arrive.  The final ``decisions.jsonl`` is sorted by
+        ``(date, ticker)`` so it is byte-for-byte reproducible across runs.
 
         Returns
         -------
@@ -126,7 +129,15 @@ class BacktestEngine:
             ``n_decisions``, ``tickers``, ``start_date``, ``end_date``,
             ``backbone``, ``decisions_log`` (last 20 entries).
         """
-        from mcp_quant_agent.agents.orchestrator import AgentState, build_graph
+        return asyncio.run(self._run_async_body())
+
+    async def _run_async_body(self) -> dict[str, Any]:
+        """Async implementation of the backtest loop."""
+        from mcp_quant_agent.agents.orchestrator import (
+            OpenAIBackbone,
+            StubBackbone,
+            perceive_ticker,
+        )
         from mcp_quant_agent.clock import SimulationClock, set_clock
         from mcp_quant_agent.eval.financial import (
             bootstrap_sharpe_ci,
@@ -134,6 +145,10 @@ class BacktestEngine:
         )
         from mcp_quant_agent.mcp_servers.data.yfinance_source import _fetch_raw_bars
         from mcp_quant_agent.mcp_servers.execution.paper_trading import Portfolio
+        from mcp_quant_agent.observability.langfuse_setup import (
+            _is_langfuse_configured,
+            log_decision,
+        )
 
         # ── 1. Validate API key ───────────────────────────────────────────────
         if not self.use_stub:
@@ -168,15 +183,27 @@ class BacktestEngine:
                 logger.error("  Failed to fetch %s: %s", ticker, exc)
                 price_data[ticker] = []
 
-        # ── 4. Build orchestrator ─────────────────────────────────────────────
-        graph = build_graph(
-            model=self.model,
-            use_stub=self.use_stub,
-            portfolio=portfolio,
-            use_cache=self.use_llm_cache,
-        )
+        # ── 4. Build backbone ─────────────────────────────────────────────────
+        # We use the backbone directly (not through LangGraph) so that the
+        # perceive and decide steps can be decoupled and parallelised.
+        backbone: StubBackbone | OpenAIBackbone
+        if self.use_stub:
+            backbone = StubBackbone()
+        else:
+            import os
 
-        # ── 5. Collect trading dates (union of all tickers' bar dates) ────────
+            from mcp_quant_agent.config import settings as _settings
+
+            # pydantic-settings doesn't inject into os.environ; forward manually
+            # so AsyncOpenAI and langfuse.openai can find OPENAI_API_KEY.
+            if not os.environ.get("OPENAI_API_KEY") and _settings.openai_api_key:
+                os.environ["OPENAI_API_KEY"] = _settings.openai_api_key
+            _is_langfuse_configured()
+            backbone = OpenAIBackbone(model=self.model, use_cache=self.use_llm_cache)
+
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        # ── 5. Collect trading dates ──────────────────────────────────────────
         all_date_strs = sorted(
             {bar["date"] for bars in price_data.values() for bar in bars}
         )
@@ -208,102 +235,223 @@ class BacktestEngine:
         if not self.use_stub:
             runs_dir.mkdir(parents=True, exist_ok=True)
             results_dir.mkdir(parents=True, exist_ok=True)
-        jsonl_path = runs_dir / "decisions.jsonl"
-        jsonl_fh = open(jsonl_path, "w", encoding="utf-8") if not self.use_stub else None  # noqa: SIM115
 
-        # ── 6. Bar-by-bar loop ────────────────────────────────────────────────
+        # ── 6. Async bar-by-bar loop ──────────────────────────────────────────
         nav_series: list[float] = []
-        decisions_log: list[dict[str, Any]] = []
+        all_entries: list[dict[str, Any]] = []  # collected across all dates; sorted at end
         n_decisions = 0
 
         logger.info(
-            "Backtest: %d bars × %d tickers (backbone=%s).",
+            "Backtest: %d bars × %d tickers (backbone=%s, concurrency=%d).",
             len(all_date_strs),
             len(self.tickers),
             "stub" if self.use_stub else self.model,
+            self.concurrency,
         )
 
         for date_str in all_date_strs:
             date = dt.date.fromisoformat(date_str)
             clock.advance_to(date)
 
-            # Agent step for each ticker
-            for ticker in self.tickers:
-                if ticker not in price_lookup or date_str not in price_lookup[ticker]:
-                    continue  # no bar for this ticker on this date
+            # Tickers with a bar on this date (in deterministic order).
+            active_tickers = [
+                t for t in self.tickers
+                if t in price_lookup and date_str in price_lookup[t]
+            ]
+            if not active_tickers:
+                current_prices_empty: dict[str, float] = {}
+                nav_series.append(portfolio.record_nav(current_prices_empty, timestamp=date_str))
+                continue
 
-                initial_state: AgentState = {
-                    "ticker": ticker,
-                    "t_now_str": date_str,
-                    "bars": [],
-                    "news": [],
-                    "indicators": {},
-                    "portfolio": {},
-                    "reasoning": "",
-                    "decision": {},
-                    "fill": None,
-                    "regime": None,
-                    "errors": [],
-                    "tool_outputs": [],
-                    "latency_ms": 0.0,
-                }
-                try:
-                    result = graph.invoke(initial_state)
-                    n_decisions += 1
-                    decision = result.get("decision", {})
-                    entry: dict[str, Any] = {
-                        "date": date_str,
-                        "ticker": ticker,
-                        "action": decision.get("action", "hold"),
-                        "quantity": decision.get("quantity", 0),
-                        "rationale": decision.get("rationale", ""),
-                        "fill": result.get("fill"),
-                        "regime": result.get("regime"),
-                        "indicators": {
-                            k: v for k, v in result.get("indicators", {}).items()
-                            if not str(k).startswith("_")
-                        },
-                        "tool_outputs": result.get("tool_outputs", []),
-                        "latency_ms": result.get("latency_ms", 0.0),
-                        "errors": result.get("errors", []),
-                    }
-                    decisions_log.append(entry)
-                    if jsonl_fh is not None:
-                        jsonl_fh.write(json.dumps(entry, default=str) + "\n")
-                        jsonl_fh.flush()
-                except Exception as exc:
-                    logger.error("Agent error on %s/%s: %s", date_str, ticker, exc)
-                    error_entry: dict[str, Any] = {
-                        "date": date_str,
-                        "ticker": ticker,
-                        "action": "error",
-                        "quantity": 0,
-                        "rationale": "",
-                        "fill": None,
-                        "regime": None,
-                        "indicators": {},
-                        "tool_outputs": [],
-                        "latency_ms": 0.0,
-                        "errors": [str(exc)],
-                    }
-                    decisions_log.append(error_entry)
-                    if jsonl_fh is not None:
-                        jsonl_fh.write(json.dumps(error_entry, default=str) + "\n")
-                        jsonl_fh.flush()
-
-            # Record NAV (after all tickers for this date)
-            current_prices = {
-                ticker: float(price_lookup[ticker][date_str]["close"])
-                for ticker in self.tickers
-                if ticker in price_lookup and date_str in price_lookup[ticker]
+            # Start-of-date portfolio snapshot (read once, shared by all tickers).
+            # All tickers on this date see the same portfolio context, regardless
+            # of async completion order — this is the determinism guarantee.
+            current_prices_snap = {
+                t: float(price_lookup[t][date_str]["close"]) for t in active_tickers
             }
-            nav = portfolio.record_nav(current_prices, timestamp=date_str)
-            nav_series.append(nav)
+            portfolio_snap = portfolio.get_portfolio_summary(current_prices_snap)
 
-        # ── 7. Close decisions.jsonl ──────────────────────────────────────────
-        if jsonl_fh is not None:
-            jsonl_fh.close()
-            logger.info("Decisions written to %s", jsonl_path)
+            # ── Concurrent phase: perceive + LLM decide ───────────────────────
+            async def _one_ticker(
+                tkr: str,
+                snap: dict[str, Any] = portfolio_snap,
+            ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+                """Perceive (thread) then decide (async), return (ticker, perceived, decision)."""
+                perceived = await asyncio.to_thread(perceive_ticker, tkr, snap)
+                # Inject ticker so backbone._build_prompt can access state["ticker"].
+                perceived["ticker"] = tkr
+                # perceive_ticker returns dict[str, Any]; cast to AgentState so
+                # decide_async type-checks correctly (fields are structurally compatible).
+                from mcp_quant_agent.agents.orchestrator import AgentState as _AS
+
+                t_start = asyncio.get_event_loop().time()
+                decision = await backbone.decide_async(cast(_AS, perceived), semaphore)
+                decision["_latency_ms"] = round(
+                    (asyncio.get_event_loop().time() - t_start) * 1000.0, 1
+                )
+                return tkr, perceived, decision
+
+            ticker_results = await asyncio.gather(
+                *[_one_ticker(t) for t in active_tickers],
+                return_exceptions=False,
+            )
+
+            # ── Serial phase: execute orders in deterministic ticker order ─────
+            # ticker_results arrives in the same order as active_tickers (gather
+            # preserves order), but sort explicitly for clarity + safety.
+            ticker_results_sorted = sorted(ticker_results, key=lambda x: x[0])
+
+            for tkr, perceived, decision in ticker_results_sorted:
+                action = decision.get("action", "hold").lower()
+                quantity = int(decision.get("quantity", 0))
+                rationale = str(decision.get("rationale", ""))
+                latency_ms = float(decision.get("_latency_ms", 0.0))
+                errors = list(perceived.get("errors", []))
+
+                bars_for_ticker = perceived.get("bars", [])
+                fill: dict[str, Any] | None = None
+                if action in ("buy", "sell") and quantity > 0 and bars_for_ticker:
+                    price = float(bars_for_ticker[-1]["close"])
+                    try:
+                        fill_obj = portfolio.place_order(tkr, action, quantity, price)
+                        fill = {
+                            "ticker": tkr,
+                            "side": action,
+                            "quantity": quantity,
+                            "price": price,
+                            "timestamp": fill_obj.timestamp,
+                            "notional": fill_obj.notional,
+                        }
+                    except ValueError as exc:
+                        errors.append(f"order_rejected: {exc}")
+                        logger.warning("Order rejected for %s: %s", tkr, exc)
+
+                indicators = perceived.get("indicators", {})
+                nav = float(portfolio_snap.get("nav", 0.0)) or 1.0
+                positions_with_pct = [
+                    {
+                        "ticker": p.get("ticker"),
+                        "quantity": p.get("quantity"),
+                        "market_value": round(float(p.get("market_value", 0.0)), 2),
+                        "pct_of_nav": round(float(p.get("market_value", 0.0)) / nav, 4),
+                    }
+                    for p in portfolio_snap.get("positions", [])
+                ]
+                news = perceived.get("news", [])
+
+                tool_outputs: list[dict[str, Any]] = [
+                    {
+                        "tool": "get_price_history",
+                        "bars_count": len(bars_for_ticker),
+                        "bars_recent": [
+                            {
+                                "date": b["date"],
+                                "open": round(float(b.get("open", 0)), 4),
+                                "high": round(float(b.get("high", 0)), 4),
+                                "low": round(float(b.get("low", 0)), 4),
+                                "close": round(float(b.get("close", 0)), 4),
+                                "volume": int(b.get("volume", 0)),
+                            }
+                            for b in bars_for_ticker[-5:]
+                        ],
+                    },
+                    {
+                        "tool": "get_news_items",
+                        "items_count": len(news),
+                        "items_recent": [
+                            {
+                                "date": n.get("datetime", n.get("date", "")),
+                                "headline": str(n.get("headline", n.get("title", "")))[:120],
+                            }
+                            for n in news[:3]
+                        ],
+                    },
+                    {
+                        "tool": "compute_indicators",
+                        "values": {
+                            k: round(v, 4) if isinstance(v, float) else v
+                            for k, v in indicators.items()
+                            if v is not None and not str(k).startswith("_")
+                        },
+                    },
+                    {
+                        "tool": "get_current_regime",
+                        "regime": perceived.get("regime"),
+                    },
+                    {
+                        "tool": "get_portfolio",
+                        "cash": round(float(portfolio_snap.get("cash", 0.0)), 2),
+                        "nav": round(float(portfolio_snap.get("nav", 0.0)), 2),
+                        "positions": positions_with_pct,
+                    },
+                ]
+
+                entry: dict[str, Any] = {
+                    "date": date_str,
+                    "ticker": tkr,
+                    "action": action,
+                    "quantity": quantity,
+                    "rationale": rationale,
+                    "fill": fill,
+                    "regime": perceived.get("regime"),
+                    "indicators": {
+                        k: v for k, v in indicators.items()
+                        if not str(k).startswith("_")
+                    },
+                    "tool_outputs": tool_outputs,
+                    "latency_ms": latency_ms,
+                    "errors": errors,
+                }
+                all_entries.append(entry)
+                n_decisions += 1
+
+                # Best-effort Langfuse trace
+                if not self.use_stub:
+                    try:
+                        log_decision(
+                            trace_id=f"{tkr}-{date_str}",
+                            t_now=date_str,
+                            ticker=tkr,
+                            inputs={
+                                "bars_count": len(bars_for_ticker),
+                                "indicators": {
+                                    k: v for k, v in indicators.items()
+                                    if not str(k).startswith("_")
+                                },
+                                "regime": perceived.get("regime"),
+                                "portfolio": portfolio_snap,
+                                "errors": errors,
+                            },
+                            tool_outputs=tool_outputs,
+                            reasoning=rationale,
+                            decision=decision,
+                            fill=fill,
+                            latency_ms=latency_ms,
+                        )
+                    except Exception as exc:
+                        logger.debug("Langfuse logging skipped: %s", exc)
+
+            # Record NAV after all orders for this date
+            nav_val = portfolio.record_nav(current_prices_snap, timestamp=date_str)
+            nav_series.append(nav_val)
+
+            if len(nav_series) % 50 == 0:
+                logger.info(
+                    "  bar %d/%d  NAV=%.0f",
+                    len(nav_series), len(all_date_strs), nav_val,
+                )
+
+        # ── 7. Write decisions.jsonl sorted by (date, ticker) ─────────────────
+        # Sorting makes the file deterministic and diffable across runs.
+        all_entries.sort(key=lambda e: (e["date"], e["ticker"]))
+        decisions_log = all_entries  # full list alias
+
+        if not self.use_stub:
+            jsonl_path = runs_dir / "decisions.jsonl"
+            with open(jsonl_path, "w", encoding="utf-8") as jsonl_fh:  # noqa: SIM115
+                for entry in all_entries:
+                    jsonl_fh.write(json.dumps(entry, default=str) + "\n")
+            logger.info("Decisions written to %s (%d entries)", jsonl_path, len(all_entries))
 
         # ── 8. Compute metrics ────────────────────────────────────────────────
         metrics = compute_all_metrics(nav_series) if len(nav_series) > 1 else {}

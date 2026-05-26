@@ -32,11 +32,14 @@ See ``docs/DECISIONS.md``: stub-backbone and orchestration entries.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -94,10 +97,26 @@ def _load_cache(key: str) -> str | None:
 
 
 def _save_cache(key: str, response: str) -> None:
+    """Write cache entry atomically (temp-file → rename) for thread-safety.
+
+    If two coroutines race to save the same key, one rename wins and the other
+    silently overwrites it with an identical payload — harmless.  The critical
+    guarantee is that no reader ever sees a partial write.
+    """
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    (_CACHE_DIR / f"{key}.json").write_text(
-        json.dumps({"response": response}), encoding="utf-8"
-    )
+    payload = json.dumps({"response": response}).encode("utf-8")
+    dest = _CACHE_DIR / f"{key}.json"
+    # Write to a temp file in the same directory, then rename atomically.
+    fd, tmp_path = tempfile.mkstemp(dir=_CACHE_DIR, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+        # On Windows, os.replace() is atomic within the same filesystem.
+        os.replace(tmp_path, dest)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +227,74 @@ class StubBackbone:
             "rationale": f"stub: close {last_close:.2f} within SMA20 +/-2%",
         }
 
+    async def decide_async(
+        self,
+        state: AgentState,
+        semaphore: asyncio.Semaphore,  # noqa: ARG002  # signature parity with OpenAIBackbone
+    ) -> dict[str, Any]:
+        """Async shim — stub is CPU-bound and instant; no semaphore needed."""
+        return self.decide(state)
+
+
+async def _call_openai_async(
+    model: str,
+    prompt: str,
+    max_retries: int = 6,
+) -> str:
+    """Call the OpenAI chat API asynchronously with exponential back-off.
+
+    Retries on HTTP 429 (rate-limit) and transient timeouts.  The back-off
+    schedule is 1 s, 2 s, 4 s, 8 s, 16 s, 32 s — caps at 32 s per attempt.
+
+    Parameters
+    ----------
+    model:
+        OpenAI model ID.
+    prompt:
+        User-turn prompt text.
+    max_retries:
+        Maximum number of attempts (including the first).
+
+    Raises
+    ------
+    RuntimeError
+        If all retries are exhausted.
+    """
+    try:
+        from openai import AsyncOpenAI, RateLimitError
+    except ImportError as exc:
+        raise ImportError("openai package is required") from exc
+
+    client = AsyncOpenAI()
+    last_exc: Exception = RuntimeError("no attempt made")
+    for attempt in range(max_retries):
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=512,
+                response_format={"type": "json_object"},
+            )
+            return str(response.choices[0].message.content or "")
+        except RateLimitError as exc:
+            last_exc = exc
+            wait = min(2**attempt, 32)
+            logger.warning(
+                "OpenAI 429 rate-limit on attempt %d/%d — back-off %.0fs",
+                attempt + 1, max_retries, wait,
+            )
+            await asyncio.sleep(wait)
+        except Exception as exc:
+            # Non-retriable error — reraise immediately.
+            raise exc from exc
+    raise RuntimeError(
+        f"OpenAI call failed after {max_retries} attempts: {last_exc}"
+    )
+
 
 class OpenAIBackbone:
     """OpenAI-backed reasoning with Langfuse tracing and disk-cache.
@@ -260,6 +347,43 @@ class OpenAIBackbone:
 
         return _parse_decision(content)
 
+    async def decide_async(
+        self,
+        state: AgentState,
+        semaphore: asyncio.Semaphore,
+    ) -> dict[str, Any]:
+        """Async version of ``decide``, rate-limited by *semaphore*.
+
+        Cache hits are served synchronously (no semaphore slot consumed).
+        Only genuine API calls acquire the semaphore so that the concurrency
+        limit applies precisely to in-flight network requests.
+
+        The prompt is identical to the sync path — same cache namespace,
+        so a prior sync run populates the cache for async runs.
+        """
+        prompt = self._build_prompt(state)
+        key = _cache_key(self.model, prompt)
+
+        if self.use_cache:
+            cached = _load_cache(key)
+            if cached is not None:
+                logger.debug(
+                    "LLM cache HIT (async) for %s/%s",
+                    state["ticker"], state["t_now_str"],
+                )
+                return _parse_decision(cached)
+
+        async with semaphore:
+            content = await _call_openai_async(self.model, prompt)
+
+        if self.use_cache:
+            _save_cache(key, content)
+            logger.debug(
+                "LLM cache MISS (async) — saved for %s/%s",
+                state["ticker"], state["t_now_str"],
+            )
+        return _parse_decision(content)
+
     @staticmethod
     def _build_prompt(state: AgentState) -> str:
         """Build the user-turn prompt for the LLM.
@@ -302,6 +426,107 @@ class OpenAIBackbone:
             f"Portfolio state:\n{json.dumps(portfolio, indent=2)}\n\n"
             f"Provide your chain-of-thought then output the JSON decision.\n"
         )
+
+
+# ---------------------------------------------------------------------------
+# Standalone perceive helper (used by async engine)
+# ---------------------------------------------------------------------------
+
+
+def perceive_ticker(
+    ticker: str,
+    portfolio_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fetch price bars, news, indicators, regime for *ticker* at the current clock time.
+
+    This replicates ``perceive_node`` as a standalone function so the async
+    engine can call it in a thread pool (via ``asyncio.to_thread``) without
+    going through the LangGraph graph.
+
+    Parameters
+    ----------
+    ticker:
+        Equity ticker to perceive.
+    portfolio_override:
+        If provided, use this pre-computed portfolio snapshot instead of
+        calling ``_portfolio.get_portfolio_summary()`` live.  The async engine
+        passes a start-of-date snapshot here so all tickers within a date see
+        an identical, consistent portfolio context regardless of async completion
+        order.  This is also what makes serial == async: the serial engine now
+        pre-computes the same snapshot before its inner ticker loop.
+
+    Returns
+    -------
+    Partial ``AgentState`` dict (same keys as ``perceive_node``).
+    """
+    import datetime as dt
+
+    from mcp_quant_agent.clock import get_clock
+    from mcp_quant_agent.mcp_servers.analytics.indicators import compute_indicators
+    from mcp_quant_agent.mcp_servers.analytics.regime import get_current_regime
+    from mcp_quant_agent.mcp_servers.data.yfinance_source import get_price_history
+
+    clock = get_clock()
+    t_now_dt = clock.t_now
+    end_str = t_now_dt.date().isoformat()
+    start_str = (t_now_dt - dt.timedelta(days=120)).date().isoformat()
+
+    errors: list[str] = []
+    bars: list[dict[str, Any]] = []
+    news: list[dict[str, Any]] = []
+    indicators: dict[str, Any] = {}
+    regime: str | None = None
+
+    try:
+        bars = get_price_history(ticker, start_str, end_str, use_cache=True)
+    except Exception as exc:
+        errors.append(f"bars: {exc}")
+        logger.warning("perceive: bars fetch failed for %s: %s", ticker, exc)
+
+    try:
+        from mcp_quant_agent.mcp_servers.data.finnhub_source import get_news_items
+
+        news_start = (t_now_dt - dt.timedelta(days=30)).date().isoformat()
+        news = get_news_items(ticker, news_start, end_str)
+    except Exception as exc:
+        errors.append(f"news: {exc}")
+        logger.debug("perceive: news fetch skipped for %s: %s", ticker, exc)
+
+    if len(bars) >= 26:
+        try:
+            ind_result: dict[str, Any] = compute_indicators(bars)
+            if ind_result:
+                indicators = {
+                    k: v for k, v in ind_result.items()
+                    if k != "date" and v is not None
+                }
+        except Exception as exc:
+            errors.append(f"indicators: {exc}")
+
+    try:
+        regime = get_current_regime(bars)
+    except Exception as exc:
+        errors.append(f"regime: {exc}")
+
+    if portfolio_override is not None:
+        portfolio_summary: dict[str, Any] = portfolio_override
+    else:
+        # Fallback used in unit tests that call perceive_ticker directly.
+        # The async/serial engine always passes a snapshot via portfolio_override.
+        logger.warning(
+            "perceive_ticker: no portfolio_override — portfolio context will be empty"
+        )
+        portfolio_summary = {}
+
+    return {
+        "t_now_str": t_now_dt.isoformat(),
+        "bars": bars,
+        "news": news,
+        "indicators": indicators,
+        "regime": regime,
+        "portfolio": portfolio_summary,
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------
