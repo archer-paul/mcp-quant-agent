@@ -56,7 +56,22 @@ def main(
     seed: int = typer.Option(42, help="Random seed for judge sampling."),
 ) -> None:
     """Compute faithfulness, grounding, and sophistication from decisions.jsonl."""
+    import os
+
     from mcp_quant_agent.eval.reasoning import compute_all_reasoning_metrics
+
+    # Inject API keys from pydantic-settings into os.environ (needed by OpenAI SDK)
+    if not os.environ.get("OPENAI_API_KEY"):
+        from mcp_quant_agent.config import settings
+
+        if settings.openai_api_key:
+            os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+    from mcp_quant_agent.observability.langfuse_setup import _is_langfuse_configured
+
+    _is_langfuse_configured()
+    # Silence Langfuse "no active span" warnings — this script runs standalone,
+    # outside a live trace context, so span-level operations will warn noisily.
+    logging.getLogger("langfuse").setLevel(logging.ERROR)
 
     if not jsonl_path.exists():
         typer.echo(f"[ERROR] File not found: {jsonl_path}", err=True)

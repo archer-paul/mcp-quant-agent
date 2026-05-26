@@ -1,5 +1,52 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Reasoning eval: faithfulness, grounding, sophistication (ÉTAPE 3)
+- **Context:** KellyBench (arXiv:2604.27865) shows "knowledge-action gap" — models state
+  correct reasoning but execute inconsistent actions.  StockBench evaluates output actions
+  but not the chain-of-thought.  This thesis claims CoT eval as its key differentiator.
+  Three complementary metrics are needed: consistency check (faithfulness), factual accuracy
+  (grounding), and reasoning quality (sophistication).
+- **Decision — Faithfulness:** Keyword-based intent extraction from the rationale text.
+  Patterns match ``\bbuy\b``, ``\bsell\b``, ``\bhold\b``, ``\bnot buy\b``, etc. (word
+  boundaries, case-insensitive).  ``_extract_intent`` returns the dominant signal or None.
+  Faithfulness = fraction of decisions where ``intent == action``.  Decisions with no
+  detectable signal are excluded (not penalised): an ambiguous rationale is not a bug.
+  Rationale: a fully deterministic, zero-cost check that runs instantly on any
+  ``decisions.jsonl`` without an API call.  Pattern list is conservative and auditable.
+- **Decision — Grounding:** Regex extracts ``(label, float)`` pairs from the rationale
+  (three patterns: parenthesised ``SMA (136.22)``, ``at/of/= X.xx``, ``value (label)``).
+  Integers without decimal point are excluded (noise reduction: share counts, year numbers).
+  Each claim is matched against the ``indicators`` dict within 1% relative tolerance, or
+  against recent bar prices (open/high/low/close).  Grounding = ``n_grounded / n_claims``.
+  Decisions with zero numeric claims score as "no signal" (not penalised).
+  Rationale: directly tests whether numbers cited in the CoT are hallucinated or real.
+- **Decision — Sophistication:** LLM judge (gpt-4.1-mini) with 4 criteria — risk_management,
+  uncertainty_acknowledgement, regime_adaptation, coherence — each scored 0.0–1.0.
+  ``response_format=json_object`` enforces structured output.  A random sample of
+  ``max_sophistication_per_regime`` decisions is drawn per regime (default 50) to bound cost.
+  Rationale: the 4-criterion rubric maps directly to the thesis claims (regime-adaptive
+  reasoning, calibrated uncertainty).  Cost ≈ $0.00032/decision.
+- **Decision — Aggregation:** All three metrics are aggregated BY REGIME (bull/bear/range/hv).
+  This is the core thesis claim: does agent quality degrade in adversarial regimes?
+- **Consequence:** The faithfulness/grounding metrics are cheap (regex + dict lookup) and
+  deterministic — always re-runnable on ``decisions.jsonl`` for free.  Sophistication costs
+  ~$0.50 for the full thesis run (5 tickers × 501 bars, 50 decisions sampled per regime).
+  Regime-segmented tables are the primary thesis output.
+
+### 2026-05 — decisions.jsonl schema: incremental write, full schema, flush-per-entry
+- **Context:** The LLM backbone costs ~$2.37 for the thesis run.  If the process crashes
+  mid-run, all paid-for decisions must be recoverable without re-calling the API.
+- **Decision:** Write one JSON line per decision immediately after ``graph.invoke`` returns,
+  call ``f.flush()`` after each write.  Schema includes: ``date``, ``ticker``, ``action``,
+  ``quantity``, ``rationale``, ``fill``, ``regime``, ``indicators``, ``tool_outputs``,
+  ``latency_ms``, ``errors``.  ``tool_outputs`` (actual data returned by MCP tools) is
+  required for the grounding metric; ``rationale`` is the full CoT for faithfulness and
+  sophistication.  Error decisions (``action="error"``) are written with the exception message
+  and excluded by the reasoning metrics.
+- **Consequence:** The file is always in a valid append-only state.  Reasoning metrics can be
+  (re-)computed at any time without re-running the agent.  File path:
+  ``runs/<run_id>/decisions.jsonl``; run ID format ``{backbone}_{timestamp}`` auto-generated.
+
 ### 2026-05 — Regime label stability: causal min-hold smoothing (default min_hold=3)
 - **Context:** Diagnostic on AAPL/MSFT/NVDA 2022-2024 with 20d-trend v2 detector: 29-36%
   of regime runs last only 1 bar (single-day "spike"), 41-56% last ≤ 2 bars.  Thesis
