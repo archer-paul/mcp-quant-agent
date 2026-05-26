@@ -276,7 +276,7 @@ async def _call_openai_async(
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=512,
+                max_tokens=1024,
                 response_format={"type": "json_object"},
             )
             return str(response.choices[0].message.content or "")
@@ -334,7 +334,7 @@ class OpenAIBackbone:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=512,
+            max_tokens=1024,
             # Force JSON output so _parse_decision never falls back to hold.
             # Requires the system prompt to mention "JSON" (it does).
             response_format={"type": "json_object"},
