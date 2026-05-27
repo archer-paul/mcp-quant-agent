@@ -465,3 +465,82 @@ class TestMinHoldSmoothing:
         assert regime != Regime.BEAR.value, (
             f"v2 should detect recovery but got {regime!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 6. Determinism tests (same input → same output, no randomness)
+# ---------------------------------------------------------------------------
+
+
+class TestRegimeDeterminism:
+    """label_regimes_v2 is a pure function — same input must always give the
+    same labels across repeated calls and between runs.
+
+    Motivation: run #1 and run #2 of the thesis produced different regime
+    distributions (range: 150→40, high_vol: 824→506).  Root cause was NOT
+    non-determinism in the detector — it was corrupt price data in run #1
+    (yfinance MultiIndex bug → wrong OHLCV inputs → different vol/momentum
+    calculations → different labels).  Run #2 with validated prices is the
+    ground truth.
+
+    These tests verify: (a) the detector itself is deterministic, and (b)
+    identical price inputs always yield identical outputs.  If this test ever
+    fails, there is randomness or mutable global state in the detector.
+
+    See docs/DECISIONS.md: "Regime label stability between runs (2026-05)".
+    """
+
+    def test_v2_same_call_twice_identical(self) -> None:
+        """Calling label_regimes_v2 twice on the same rows gives identical output."""
+        rows = _make_rows(150, daily_return=0.004)
+        result_a = label_regimes_v2(rows)
+        result_b = label_regimes_v2(rows)
+        for i in range(len(rows)):
+            assert result_a[i]["regime"] == result_b[i]["regime"], (
+                f"Non-determinism at bar {i}: {result_a[i]['regime']!r} != {result_b[i]['regime']!r}"
+            )
+
+    def test_v2_deterministic_on_mixed_series(self) -> None:
+        """Determinism holds on a series with both calm and volatile segments."""
+        rows = _make_rows(50) + _make_volatile_rows(50, start_idx=50)
+        result_a = label_regimes_v2(rows)
+        result_b = label_regimes_v2(rows)
+        for i in range(len(rows)):
+            assert result_a[i]["regime"] == result_b[i]["regime"], (
+                f"Non-determinism at bar {i} in calm+volatile series"
+            )
+
+    def test_v2_deterministic_with_smoothing(self) -> None:
+        """min_hold smoothing does not introduce non-determinism."""
+        rows = _make_rows(100, daily_return=0.003)
+        a = label_regimes_v2(rows, min_hold=3)
+        b = label_regimes_v2(rows, min_hold=3)
+        assert [r["regime"] for r in a] == [r["regime"] for r in b]
+
+    def test_v1_deterministic(self) -> None:
+        """label_regimes (v1) is also deterministic."""
+        rows = _make_rows(150, daily_return=0.006)
+        result_a = label_regimes(rows)
+        result_b = label_regimes(rows)
+        for i in range(len(rows)):
+            assert result_a[i]["regime"] == result_b[i]["regime"], (
+                f"v1 non-determinism at bar {i}"
+            )
+
+    def test_identical_prices_identical_labels_across_runs(self) -> None:
+        """Regression test: correct prices → stable labels.
+
+        Run #1 had corrupt prices (wrong OHLCV values) → wrong regime labels.
+        Run #2 used validated prices → correct, stable labels.
+        This test verifies the invariant: same validated prices → same labels
+        every time, regardless of how many times the detector is called.
+        """
+        # Two runs with identical, validated price data → must give identical labels
+        rows = _make_rows(200, daily_return=0.003)
+        labels_run_a = [r["regime"] for r in label_regimes_v2(rows)]
+        labels_run_b = [r["regime"] for r in label_regimes_v2(rows)]
+        assert labels_run_a == labels_run_b, (
+            "Regime labels changed between two calls on identical price data. "
+            "This would indicate non-determinism in the detector — "
+            "see docs/DECISIONS.md for the run #1/#2 instability root cause."
+        )
