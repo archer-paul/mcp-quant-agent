@@ -143,7 +143,6 @@ class BacktestEngine:
             bootstrap_sharpe_ci,
             compute_all_metrics,
         )
-        from mcp_quant_agent.mcp_servers.data.yfinance_source import _fetch_raw_bars
         from mcp_quant_agent.mcp_servers.execution.paper_trading import Portfolio
         from mcp_quant_agent.observability.langfuse_setup import (
             _is_langfuse_configured,
@@ -166,19 +165,46 @@ class BacktestEngine:
         set_clock(clock)
         portfolio = Portfolio(cash=self.initial_cash, initial_cash=self.initial_cash)
 
-        # ── 3. Pre-fetch price data ───────────────────────────────────────────
+        # ── 3. Pre-fetch price data (with warm-up window) ────────────────────
+        # CRITICAL: fetch warm-up bars BEFORE the backtest window and write
+        # them to the parquet cache.  perceive_ticker → get_price_history reads
+        # the parquet cache.  Without this step, the first ~186 bars per ticker
+        # (AAPL/MSFT) would find an empty cache and return 0 bars → regime=None.
+        #
+        # Root cause of run #2 "unknown" regime phantom (372 decisions):
+        # _fetch_raw_bars bypasses the parquet cache; perceive_ticker calls
+        # get_price_history which reads from cache → empty → 0 bars → None.
+        # Fix: extend pre-fetch by WARMUP_DAYS and call cache.merge_and_write.
+        _WARMUP_DAYS = 130  # ~90 trading days — covers 20d regime warm-up + regime vol baseline
+        warmup_start = (
+            dt.date.fromisoformat(self.start_date) - dt.timedelta(days=_WARMUP_DAYS)
+        ).isoformat()
+
         logger.info(
-            "Pre-fetching price data for %s (%s → %s)...",
+            "Pre-fetching price data for %s (warmup %s → backtest %s → %s)...",
             self.tickers,
+            warmup_start,
             self.start_date,
             self.end_date,
+        )
+        from mcp_quant_agent.mcp_servers.data.yfinance_source import (
+            _fetch_raw_bars,
+            _get_cache,
         )
         price_data: dict[str, list[dict[str, Any]]] = {}
         for ticker in self.tickers:
             try:
-                bars = _fetch_raw_bars(ticker, self.start_date, self.end_date, "1d")
-                price_data[ticker] = bars
-                logger.info("  %s: %d bars fetched.", ticker, len(bars))
+                # Fetch warm-up + full backtest range
+                all_bars = _fetch_raw_bars(ticker, warmup_start, self.end_date, "1d")
+                if all_bars:
+                    # Populate the parquet cache so perceive_ticker finds warm-up data
+                    _get_cache().merge_and_write(ticker, "1d", all_bars)
+                # Trading loop only needs bars within the backtest window
+                price_data[ticker] = [b for b in all_bars if b["date"] >= self.start_date]
+                logger.info(
+                    "  %s: %d total bars fetched (%d in backtest window).",
+                    ticker, len(all_bars), len(price_data[ticker]),
+                )
             except Exception as exc:
                 logger.error("  Failed to fetch %s: %s", ticker, exc)
                 price_data[ticker] = []
@@ -312,19 +338,55 @@ class BacktestEngine:
                 fill: dict[str, Any] | None = None
                 if action in ("buy", "sell") and quantity > 0 and bars_for_ticker:
                     price = float(bars_for_ticker[-1]["close"])
-                    try:
-                        fill_obj = portfolio.place_order(tkr, action, quantity, price)
-                        fill = {
-                            "ticker": tkr,
-                            "side": action,
-                            "quantity": quantity,
-                            "price": price,
-                            "timestamp": fill_obj.timestamp,
-                            "notional": fill_obj.notional,
-                        }
-                    except ValueError as exc:
-                        errors.append(f"order_rejected: {exc}")
-                        logger.warning("Order rejected for %s: %s", tkr, exc)
+                    # ── Engine-level position-sizing cap (Fix #4) ─────────────
+                    # Prevent degenerate runs where the LLM requests fixed-share
+                    # quantities far exceeding NAV (run #2 failure: LLM requested
+                    # 200 NVDA×$68=$13,600 when NAV=$85 → all orders rejected).
+                    # The LLM is instructed in SYSTEM_PROMPT to use NAV-scaled
+                    # quantities; this cap is the structural backstop.
+                    nav_for_cap = float(portfolio_snap.get("nav", 0.0)) or 1.0
+                    if price > 0:
+                        if action == "buy":
+                            max_total = int(0.20 * nav_for_cap / price)
+                            current_held = int(sum(
+                                float(p.get("quantity", 0))
+                                for p in portfolio_snap.get("positions", [])
+                                if p.get("ticker") == tkr
+                            ))
+                            capped = max(0, max_total - current_held)
+                            if quantity != capped:
+                                logger.info(
+                                    "Engine cap %s buy: %d→%d (nav=%.0f px=%.2f)",
+                                    tkr, quantity, capped, nav_for_cap, price,
+                                )
+                            quantity = capped
+                        elif action == "sell":
+                            max_sell = int(sum(
+                                float(p.get("quantity", 0))
+                                for p in portfolio_snap.get("positions", [])
+                                if p.get("ticker") == tkr
+                            ))
+                            if quantity > max_sell:
+                                logger.info(
+                                    "Engine cap %s sell: %d→%d (held=%d)",
+                                    tkr, quantity, max_sell, max_sell,
+                                )
+                            quantity = min(quantity, max_sell)
+                    # ─────────────────────────────────────────────────────────
+                    if quantity > 0:
+                        try:
+                            fill_obj = portfolio.place_order(tkr, action, quantity, price)
+                            fill = {
+                                "ticker": tkr,
+                                "side": action,
+                                "quantity": quantity,
+                                "price": price,
+                                "timestamp": fill_obj.timestamp,
+                                "notional": fill_obj.notional,
+                            }
+                        except ValueError as exc:
+                            errors.append(f"order_rejected: {exc}")
+                            logger.warning("Order rejected for %s: %s", tkr, exc)
 
                 indicators = perceived.get("indicators", {})
                 nav = float(portfolio_snap.get("nav", 0.0)) or 1.0
