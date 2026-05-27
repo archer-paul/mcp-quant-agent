@@ -101,8 +101,8 @@ def main(
         faith_all = compute_faithfulness_llm(decisions, judge_model=judge_model, seed=seed)
         ground_all = compute_grounding(decisions)
 
-        header = ["regime", "n_decisions", "faithfulness", "n_unfaithful",
-                  "n_constrained", "grounding"]
+        header = ["regime", "n_decisions", "faithfulness", "faith_strict",
+                  "n_unfaithful", "n_constrained", "grounding"]
         rows: list[list[Any]] = []
         for regime, rd in sorted(regimes.items()):
             faith = compute_faithfulness_llm(rd, judge_model=judge_model, seed=seed)
@@ -110,12 +110,14 @@ def main(
             rows.append([
                 regime, len(rd),
                 f"{faith['faithfulness']:.3f}",
+                f"{faith['faithfulness_strict']:.3f}",
                 faith["n_unfaithful"], faith["n_constrained"],
                 f"{grnd['grounding']:.3f}",
             ])
         rows.append([
             "OVERALL", len(decisions),
             f"{faith_all['faithfulness']:.3f}",
+            f"{faith_all['faithfulness_strict']:.3f}",
             faith_all["n_unfaithful"], faith_all["n_constrained"],
             f"{ground_all['grounding']:.3f}",
         ])
@@ -126,11 +128,13 @@ def main(
         _print_table(header, rows)
         typer.echo()
         typer.echo("  Faithfulness detail (LLM judge):")
-        typer.echo(f"    n_scoreable  : {faith_all['n_scoreable']}")
-        typer.echo(f"    n_faithful   : {faith_all['n_faithful']}")
-        typer.echo(f"    n_unfaithful : {faith_all['n_unfaithful']}")
-        typer.echo(f"    n_constrained: {faith_all['n_constrained']}")
-        typer.echo(f"    n_judge_fail : {faith_all['n_judge_failed']}")
+        typer.echo(f"    n_scoreable       : {faith_all['n_scoreable']}")
+        typer.echo(f"    n_faithful        : {faith_all['n_faithful']}")
+        typer.echo(f"    n_unfaithful      : {faith_all['n_unfaithful']}")
+        typer.echo(f"    n_constrained     : {faith_all['n_constrained']}")
+        typer.echo(f"    n_judge_fail      : {faith_all['n_judge_failed']}")
+        typer.echo(f"    faithfulness      : {faith_all['faithfulness']:.4f}  (faithful / scoreable)")
+        typer.echo(f"    faithfulness_strict: {faith_all['faithfulness_strict']:.4f}  (faithful / (faithful+unfaithful))")
         typer.echo()
         typer.echo("  Grounding detail:")
         typer.echo(f"    n_claims     : {ground_all['n_claims_total']}")
@@ -171,11 +175,13 @@ def main(
     gd = report["grounding_detail"]
     sd = report["sophistication_detail"]
     typer.echo("  Faithfulness detail (LLM judge):")
-    typer.echo(f"    n_scoreable  : {fd['n_scoreable']}")
-    typer.echo(f"    n_faithful   : {fd['n_faithful']}")
-    typer.echo(f"    n_unfaithful : {fd['n_unfaithful']}")
-    typer.echo(f"    n_constrained: {fd['n_constrained']}")
-    typer.echo(f"    n_judge_fail : {fd['n_judge_failed']}")
+    typer.echo(f"    n_scoreable       : {fd['n_scoreable']}")
+    typer.echo(f"    n_faithful        : {fd['n_faithful']}")
+    typer.echo(f"    n_unfaithful      : {fd['n_unfaithful']}")
+    typer.echo(f"    n_constrained     : {fd['n_constrained']}")
+    typer.echo(f"    n_judge_fail      : {fd['n_judge_failed']}")
+    typer.echo(f"    faithfulness      : {fd['faithfulness']:.4f}  (faithful / scoreable)")
+    typer.echo(f"    faithfulness_strict: {fd.get('faithfulness_strict', 0.0):.4f}  (faithful / (faithful+unfaithful))")
     if fd.get("examples_unfaithful"):
         typer.echo("    Unfaithful examples (first 3):")
         for ex in fd["examples_unfaithful"][:3]:
