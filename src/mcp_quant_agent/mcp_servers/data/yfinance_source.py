@@ -54,6 +54,52 @@ def _get_cache() -> PriceCache:
 # ---------------------------------------------------------------------------
 
 
+def _check_price_continuity(
+    bars: list[dict[str, Any]],
+    ticker: str,
+    max_ratio: float = 5.0,
+) -> None:
+    """Raise ValueError if any adjacent-bar close-price ratio exceeds *max_ratio*.
+
+    A ratio > 5× between consecutive daily bars indicates a split-adjusted /
+    unadjusted price mix (e.g. NVDA 10:1 split in Jun 2024 causing old cached
+    bars at ~$130/share to appear next to newly-fetched bars at ~$13/share).
+    Such contamination silently destroys backtest P&L — we fail loudly instead.
+
+    Parameters
+    ----------
+    bars:
+        List of OHLCV bar dicts sorted ascending by date.
+    ticker:
+        Ticker symbol for error messages.
+    max_ratio:
+        Maximum allowable close-price ratio between consecutive bars.
+        Default 5.0 catches split/unsplit mixes; real overnight gaps are
+        far smaller (even extreme circuit-breaker moves rarely exceed 2×).
+
+    Raises
+    ------
+    ValueError
+        If any consecutive pair has a price ratio exceeding max_ratio.
+    """
+    for i in range(1, len(bars)):
+        prev_close = float(bars[i - 1].get("close", 0.0))
+        curr_close = float(bars[i].get("close", 0.0))
+        if prev_close <= 0 or curr_close <= 0:
+            continue
+        ratio = max(curr_close / prev_close, prev_close / curr_close)
+        if ratio > max_ratio:
+            raise ValueError(
+                f"Price discontinuity for {ticker}: "
+                f"{bars[i - 1]['date']} close={prev_close:.4f} → "
+                f"{bars[i]['date']} close={curr_close:.4f} "
+                f"(ratio={ratio:.1f}x, threshold={max_ratio}x). "
+                "This indicates a split-adjusted/unadjusted price mix in the "
+                "parquet cache.  Delete data/cache/prices/ and re-run to force "
+                "a fresh fetch with consistent split-adjusted prices."
+            )
+
+
 def _fetch_raw_bars(
     ticker: str,
     start: str,
@@ -141,6 +187,10 @@ def _fetch_raw_bars(
         }
         validate_bar(bar, ticker)  # raises ValueError on OHLC inconsistency or spike
         bars.append(bar)
+
+    # Guard against split-adjusted / unadjusted price mix (e.g. NVDA Jun 2024
+    # 10:1 split causing alternating $13 / $130 prices in the same series).
+    _check_price_continuity(bars, ticker)
 
     return bars
 
