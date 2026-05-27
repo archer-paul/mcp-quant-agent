@@ -1,5 +1,65 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Run #2 post-mortem: four fixes before Run #3
+
+**Context:** Run #2 produced FinalNAV=$86 (−99.9%), despite clean price data.
+Diagnostics revealed four independent issues.
+
+**Issue 1 — "unknown" regime phantom (372 decisions, 14.9%):**
+Engine pre-fetch used `_fetch_raw_bars(start_date, end_date)`, which does NOT
+write to the parquet cache.  `perceive_ticker → get_price_history` reads from
+the parquet cache → empty for AAPL/MSFT → 0 bars → `regime=None` →
+serialised as `"unknown"` in eval tables.  This inflated the "unknown" regime's
+faithfulness (0.976) and polluted all regime-segmented tables.
+**Fix:** engine pre-fetch now fetches from `start_date − 130 days` and calls
+`cache.merge_and_write`, populating the parquet cache before any backtest bar
+is processed.  `price_data[ticker]` is then filtered to `>= start_date` for the
+trading loop.  All 5 tickers get warm-up bars; regime detector has ≥ 21 bars
+from bar 1; no `None` regime.
+
+**Issue 2 — Regime label instability between runs:**
+Run #1 used corrupt prices (yfinance MultiIndex bug → wrong OHLCV scalars) →
+wrong vol/momentum inputs → different regime labels (range: 150→40,
+high_vol: 824→506 vs run #2).  The detector is fully deterministic (pure function,
+no randomness).  **Run #2 labels are the ground truth.**  No code change to
+the detector needed.  Added `TestRegimeDeterminism` (6 tests) to
+`tests/test_regime.py` verifying same price input → same labels every call.
+
+**Issue 3 — Constrained-hold exemption barely fired (5/2505):**
+`_is_constrained_hold` covered only (a) judge=buy+hold+position≥18% and
+(b) judge=sell+hold+qty==0.  Diagnostics showed 310 "judge=sell, agent=hold"
+cases with non-zero positions; 214 at 18-25% NAV.  The agent cited the 20% limit
+as the reason for holding — a defensible risk-management interpretation of the
+position cap even for the sell direction (boundary caution).
+**Fix:** added case (c): judge=sell + agent=hold + position ≥ 18% NAV →
+constrained.  The 20% boundary creates rational inertia in both directions
+(symmetric with the buy-side case).  Also added `faithfulness_strict` =
+n_faithful / (n_faithful + n_unfaithful), which excludes constrained cases
+from the denominator, as the second faithfulness metric for the thesis.
+Denominator note: the standard `faithfulness` formula (n_faithful / n_scoreable,
+where n_scoreable includes constrained) is unchanged for comparability; the
+strict metric is additive.
+
+**Issue 4 — Position sizing catastrophe:**
+The LLM used fixed share quantities (e.g. "buy 200 NVDA") instead of NAV-scaled
+quantities.  At NAV=$85, any order > 1 share of NVDA ($68) was rejected by the
+portfolio's 20% cap, freezing the portfolio for the rest of the run.
+**Fix (two layers):**
+1. SYSTEM_PROMPT updated: step 6 now includes the explicit formula
+   `qty = floor(target_fraction × NAV / last_close)` with a worked example,
+   and a guard `if NAV < 500: hold everything`.
+2. Engine hard cap (structural backstop): before every `portfolio.place_order`,
+   the engine clamps `quantity` to (a) `floor(0.20×NAV/price) − current_held`
+   for buys, (b) `min(qty, held)` for sells.  This prevents degenerate runs
+   even if the LLM ignores the SYSTEM_PROMPT.
+
+**Why four separate fixes, not one:**
+Issues 1, 3, 4 each affect a different layer (data/cache, eval metrics, order
+execution) and are fully independent.  Issue 2 required documentation + tests
+only.  Mixing them would make each harder to audit individually.
+
+---
+
 ### 2026-05 — Run #1 post-mortem: yfinance Series→scalar bug + max_tokens truncation
 
 **Run:** `gpt-4-1-mini_20260526_160051` (2022-07-01→2024-06-30, AAPL/MSFT/NVDA/JPM/XOM).
