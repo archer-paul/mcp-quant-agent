@@ -273,9 +273,18 @@ async def _call_openai_async(
         If all retries are exhausted.
     """
     try:
-        from openai import AsyncOpenAI, RateLimitError
+        from openai import (
+            APIConnectionError,
+            APITimeoutError,
+            AsyncOpenAI,
+            InternalServerError,
+            RateLimitError,
+        )
     except ImportError as exc:
         raise ImportError("openai package is required") from exc
+
+    # Exceptions that are transient and worth retrying with back-off.
+    _RETRIABLE = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
 
     client = AsyncOpenAI()
     last_exc: Exception = RuntimeError("no attempt made")
@@ -288,20 +297,20 @@ async def _call_openai_async(
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=1024,
+                max_tokens=2048,
                 response_format={"type": "json_object"},
             )
             return str(response.choices[0].message.content or "")
-        except RateLimitError as exc:
+        except _RETRIABLE as exc:
             last_exc = exc
             wait = min(2**attempt, 32)
             logger.warning(
-                "OpenAI 429 rate-limit on attempt %d/%d — back-off %.0fs",
-                attempt + 1, max_retries, wait,
+                "OpenAI transient error on attempt %d/%d (%s) — back-off %.0fs",
+                attempt + 1, max_retries, type(exc).__name__, wait,
             )
             await asyncio.sleep(wait)
         except Exception as exc:
-            # Non-retriable error — reraise immediately.
+            # Non-retriable error (e.g. AuthenticationError) — fail immediately.
             raise exc from exc
     raise RuntimeError(
         f"OpenAI call failed after {max_retries} attempts: {last_exc}"
