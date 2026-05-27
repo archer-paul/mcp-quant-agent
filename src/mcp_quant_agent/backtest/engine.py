@@ -197,8 +197,13 @@ class BacktestEngine:
                 # Fetch warm-up + full backtest range
                 all_bars = _fetch_raw_bars(ticker, warmup_start, self.end_date, "1d")
                 if all_bars:
-                    # Populate the parquet cache so perceive_ticker finds warm-up data
-                    _get_cache().merge_and_write(ticker, "1d", all_bars)
+                    # Overwrite the parquet cache so perceive_ticker finds warm-up data.
+                    # IMPORTANT: use cache.write() (overwrite), NOT merge_and_write().
+                    # merge_and_write() keeps old bars for dates not covered by the
+                    # new fetch, which can preserve stale / split-contaminated data
+                    # from a previous run.  The warm-up always fetches the FULL range
+                    # (warmup_start → end_date), so overwriting is always safe.
+                    _get_cache().write(ticker, "1d", all_bars)
                 # Trading loop only needs bars within the backtest window
                 price_data[ticker] = [b for b in all_bars if b["date"] >= self.start_date]
                 logger.info(
@@ -354,12 +359,12 @@ class BacktestEngine:
                                 if p.get("ticker") == tkr
                             ))
                             capped = max(0, max_total - current_held)
-                            if quantity != capped:
+                            if quantity > capped:
                                 logger.info(
                                     "Engine cap %s buy: %d→%d (nav=%.0f px=%.2f)",
                                     tkr, quantity, capped, nav_for_cap, price,
                                 )
-                            quantity = capped
+                            quantity = min(quantity, capped)
                         elif action == "sell":
                             max_sell = int(sum(
                                 float(p.get("quantity", 0))
