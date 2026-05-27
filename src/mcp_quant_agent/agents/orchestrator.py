@@ -135,7 +135,19 @@ trading decision.  Work through this chain-of-thought:
 3. VOLATILITY: Are Bollinger Bands wide / ATR elevated (high-vol regime)?
 4. REGIME: What is the current market regime label? Is it consistent with your analysis?
 5. NEWS SENTIMENT: Summarise the 3 most relevant news items and their likely direction.
-6. PORTFOLIO: What is current exposure? Is position size within the 20%-NAV limit?
+6. PORTFOLIO SIZING (read carefully):
+   - NAV and cash are in the portfolio state below.
+   - Target 10-15% of NAV per position.  Hard cap: 20% of NAV per position.
+   - BUY quantity formula:
+       target_value    = 0.10 * NAV          (or up to 0.15 * NAV if high conviction)
+       existing_value  = current_position_qty * last_close_price
+       additional_value = min(target_value, 0.20 * NAV - existing_value)
+       quantity        = floor(additional_value / last_close_price)
+     Example: NAV=50000, price=185, held=0 → qty = floor(0.10*50000/185) = 27
+   - SELL quantity: use position size from the portfolio (sell entire position,
+     or a partial fraction). Never sell more shares than you currently hold.
+   - If NAV < 500 (portfolio severely depleted): hold everything, do not trade.
+   - quantity=0 is ONLY valid for action="hold".
 7. DECISION: State action, exact integer quantity, and 2-3 sentence rationale.
 
 Output ONLY a JSON object -- no prose, no markdown code fences, no extra keys:
@@ -145,7 +157,7 @@ Rules:
 - "hold" -> quantity MUST be 0.
 - "buy" / "sell" -> quantity MUST be > 0.
 - Single position MUST NOT exceed 20% of portfolio NAV.
-- Insufficient data -> {"action": "hold", "quantity": 0, "rationale": "insufficient data"}.
+- Insufficient data (<20 bars) -> {"action": "hold", "quantity": 0, "rationale": "insufficient data"}.
 """
 
 
