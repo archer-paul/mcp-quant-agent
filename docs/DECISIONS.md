@@ -1,5 +1,44 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Run #3 post-mortem: three fixes before Run #4
+
+**Run:** `gpt-4-1-mini_20260527_005408`. FinalNAV = $86 (−99.9%). **INVALID.**
+
+**Bug 1 — Engine buy-cap direction (`engine.py` line 362):**
+`quantity = capped` set the buy quantity to the MAXIMUM allowed (20% of NAV),
+inflating any small legitimate LLM request to the ceiling.  Observed in logs:
+"Engine cap AAPL buy: 72→143", "Engine cap NVDA buy: 656→1312".
+**Fix:** `quantity = min(quantity, capped)` — only cap DOWN, never UP.
+Log condition also corrected from `!= capped` to `> capped`.
+
+**Bug 2 — Warm-up used `merge_and_write` instead of `write` (overwrite):**
+`merge_and_write` preserves bars from previous runs for dates not covered by the
+new fetch.  If a previous run left stale or split-contaminated bars in the parquet,
+they survive the merge.  Root cause of the NVDA price contamination: the parquet
+contained a mix of 10:1 split-adjusted prices (~$14/share) and unadjusted prices
+(~$113/share) alternating on consecutive days, producing absurd RSI=95 and a 54%-of-NAV
+NVDA buy that destroyed the portfolio.
+**Fix:** warm-up calls `cache.write(ticker, "1d", all_bars)` (complete overwrite).
+The warm-up always fetches the FULL range (warmup_start→end_date), so overwriting
+is always safe — no useful bars are lost.
+
+**Bug 3 — No price-continuity guard:**
+Neither `_fetch_raw_bars` nor `get_price_history` checked for adjacent-bar price
+jumps > 5×.  The contamination propagated silently through the entire 2-year backtest.
+**Fix:** new `_check_price_continuity(bars, ticker, max_ratio=5.0)` in
+`yfinance_source.py` raises `ValueError` on any ratio > 5× between consecutive
+daily closes.  Called in `_fetch_raw_bars` after every fetch.  If triggered in
+Run #4, it terminates the run with a clear error message instructing the user to
+delete `data/cache/prices/` and re-run.
+
+**Note on Run #3 reasoning metrics:** 0 parse_error decisions in decisions.jsonl
+(all 2505 parsed correctly); `response_format={"type": "json_object"}` ensures
+valid JSON from the OpenAI API.  The run is invalid for FINANCIAL metrics only.
+Faithfulness/grounding from Run #3 decisions.jsonl COULD technically be computed
+but are not representative (too many forced holds due to NAV collapse).
+
+---
+
 ### 2026-05 — Run #2 post-mortem: four fixes before Run #3
 
 **Context:** Run #2 produced FinalNAV=$86 (−99.9%), despite clean price data.
