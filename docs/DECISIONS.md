@@ -1,5 +1,46 @@
 # Design decisions (ADR-lite)
 
+### 2026-05-28 — Run #4 VALID: final results
+
+**Run:** `gpt-4-1-mini_20260528_112645`. Period: 2022-07-01 → 2024-06-30. **VALID.**
+
+**Financial performance:**
+
+| Metric | Agent | Equal-Wt B&H | Momentum | Mean-Rev |
+|---|---|---|---|---|
+| Ann. Return | +72.1% | +73.0% | +24.7% | +16.6% |
+| Sharpe | **2.35** [0.92, 3.58] | 2.27 | 1.91 | 1.41 |
+| Sortino | 2.74 | — | — | — |
+| Calmar | 5.76 | — | — | — |
+| Max DD | −12.5% | — | — | — |
+| Hit Rate | 54.6% | — | — | — |
+| Final NAV | $293,594 | — | — | — |
+
+Agent nearly matches B&H in raw return but exceeds it on Sharpe (2.35 vs 2.27) with
+only −12.5% max drawdown. Beats momentum by +47pp and mean-reversion by +56pp annualised.
+
+**Reasoning metrics (faithfulness LLM judge + grounding):**
+
+| Regime | n | faithfulness | faith_strict | grounding |
+|---|---|---|---|---|
+| bear | 513 | 0.429 | 0.533 | 0.999 |
+| bull | 1109 | 0.159 | 0.235 | 0.997 |
+| high_vol | 509 | 0.330 | 0.403 | 1.000 |
+| range | 374 | 0.316 | 0.379 | 0.998 |
+| **OVERALL** | **2505** | **0.281** | **0.372** | **0.998** |
+
+Grounding (0.998) is near-perfect: 8240/8255 numeric claims match tool outputs within 1%.
+Faithfulness (0.281 overall) is low — primarily driven by the "fully-deployed" structural
+effect: after ~bar 100 the portfolio is 99%+ invested (only $99–$257 cash), so all buy
+signals result in cash-rejected or cap-limited holds. The judge correctly predicts "buy"
+but the agent is structurally unable to act. Bear regime has the best faithfulness (0.429)
+because the agent does sell/hold correctly in downtrends.
+
+**Action distribution:** buy=183 (7.3%), sell=26 (1.0%), hold=2296 (91.7%)
+**Regime distribution:** bull=1109 (44%), bear=513 (20%), high_vol=509 (20%), range=374 (15%)
+**Parse errors:** 0 / 2505
+**Annotation sample:** 73 rows → `results/gpt-4-1-mini_20260528_112645/annotation_sample.csv`
+
 ### 2026-05 — Run #4 pre-launch: retry transient OpenAI errors; raise max_tokens 1024→2048
 
 **Context (Run #4 aborted twice before first valid bar):**
