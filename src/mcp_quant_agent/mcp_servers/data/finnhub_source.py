@@ -19,6 +19,18 @@ from mcp_quant_agent.config import settings
 
 logger = logging.getLogger(__name__)
 
+_news_cache: Any | None = None
+
+
+def _get_news_cache() -> Any:
+    """Return the module-level NewsCache instance."""
+    global _news_cache
+    if _news_cache is None:
+        from mcp_quant_agent.mcp_servers.data.cache import NewsCache
+
+        _news_cache = NewsCache()
+    return _news_cache
+
 
 def _get_finnhub_client() -> Any:
     """Return a Finnhub client, raising if the API key is not configured."""
@@ -142,6 +154,39 @@ def get_news_items(
     """
     clock = get_clock()
     raw = _fetch_raw_news(ticker, from_date, to_date)
+    return clock.filter_rows(raw, date_key="datetime")
+
+
+def get_news_items_cache_first(
+    ticker: str,
+    from_date: str,
+    to_date: str,
+    *,
+    offline: bool = True,
+    cache: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Return timestamped news from cache first, filtered to ``t_now``.
+
+    In offline mode, a cache miss raises loudly and never calls Finnhub. This
+    is the PM-backtest path: no network fetch should happen while replaying a
+    historical decision loop.
+    """
+    clock = get_clock()
+    news_cache = cache if cache is not None else _get_news_cache()
+
+    cached = news_cache.read_range_filtered(ticker, from_date, to_date)
+    if cached or news_cache.exists(ticker):
+        return cached
+
+    if offline:
+        raise RuntimeError(
+            f"News cache miss for {ticker} {from_date}->{to_date}. "
+            "Offline mode forbids Finnhub fetch during backtests."
+        )
+
+    raw = _fetch_raw_news(ticker, from_date, to_date)
+    if raw:
+        news_cache.merge_and_write(ticker, raw)
     return clock.filter_rows(raw, date_key="datetime")
 
 

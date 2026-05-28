@@ -204,12 +204,37 @@ class NewsCache:
         df = df.sort_values("datetime").reset_index(drop=True)
         df.to_parquet(self._path(ticker), index=False, compression="snappy")
 
+    def merge_and_write(self, ticker: str, new_items: list[dict[str, Any]]) -> None:
+        """Merge *new_items* with existing cached news and write back."""
+        if not new_items:
+            return
+        existing = self.read_all(ticker)
+        if not existing:
+            self.write(ticker, new_items)
+            return
+
+        df_old = pd.DataFrame(existing)
+        df_new = pd.DataFrame(new_items)
+        merged = pd.concat([df_old, df_new], ignore_index=True)
+        if "url" in merged.columns and merged["url"].astype(str).str.len().gt(0).any():
+            subset = ["url"]
+        else:
+            subset = ["datetime", "headline"]
+        merged = (
+            merged.drop_duplicates(subset=subset, keep="last")
+            .sort_values("datetime")
+            .reset_index(drop=True)
+        )
+        merged.to_parquet(self._path(ticker), index=False, compression="snappy")
+
     def read_all(self, ticker: str) -> list[dict[str, Any]]:
         """Return all cached news items (no t_now filter)."""
         path = self._path(ticker)
         if not path.exists():
             return []
         df = pd.read_parquet(path)
+        if "datetime" in df.columns and not pd.api.types.is_string_dtype(df["datetime"]):
+            df["datetime"] = df["datetime"].astype(str).str.replace(" ", "T")
         return df.to_dict(orient="records")  # type: ignore[return-value]
 
     def read_filtered(self, ticker: str) -> list[dict[str, Any]]:
@@ -219,3 +244,23 @@ class NewsCache:
             return []
         clock = get_clock()
         return clock.filter_rows(items, date_key="datetime")
+
+    def read_range_filtered(
+        self,
+        ticker: str,
+        from_date: str,
+        to_date: str,
+    ) -> list[dict[str, Any]]:
+        """Return cached news in [from_date, to_date], then filtered to t_now."""
+        items = [
+            item for item in self.read_all(ticker)
+            if from_date <= str(item.get("datetime", ""))[:10] <= to_date
+        ]
+        if not items:
+            return []
+        clock = get_clock()
+        return clock.filter_rows(items, date_key="datetime")
+
+    def exists(self, ticker: str) -> bool:
+        """Return True if a news cache exists for *ticker*."""
+        return self._path(ticker).exists()

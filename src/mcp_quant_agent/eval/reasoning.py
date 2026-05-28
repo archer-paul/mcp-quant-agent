@@ -78,6 +78,22 @@ def _extract_bars_recent(decision: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _extract_indicators_from_tool_outputs(decision: dict[str, Any]) -> dict[str, Any]:
+    """Return flattened indicator values from compute_indicators tool outputs."""
+    values: dict[str, Any] = {}
+    for to in decision.get("tool_outputs", []):
+        if not isinstance(to, dict) or to.get("tool") != "compute_indicators":
+            continue
+        ticker = str(to.get("ticker", "")).strip().upper()
+        prefix = f"{ticker}." if ticker else ""
+        raw_values = to.get("values", {})
+        if not isinstance(raw_values, dict):
+            continue
+        for key, value in raw_values.items():
+            values[f"{prefix}{key}"] = value
+    return values
+
+
 # ---------------------------------------------------------------------------
 # 1. FAITHFULNESS  (LLM judge — market evidence vs executed action)
 # ---------------------------------------------------------------------------
@@ -505,9 +521,7 @@ def _is_constrained_hold_v2(
         # Only: no position to sell (structural impossibility)
         for pos in portfolio.get("positions", []):
             if pos.get("ticker") == ticker:
-                if float(pos.get("quantity", 0.0)) <= 0:
-                    return True
-                return False  # has position → NOT constrained; classify as unfaithful
+                return float(pos.get("quantity", 0.0)) <= 0
         return True  # ticker not in positions → qty == 0 → constrained
 
     return False
@@ -828,7 +842,7 @@ def compute_grounding(
         if str(d.get("action", "")) == "error":
             continue
         rationale = str(d.get("rationale", ""))
-        indicators = d.get("indicators") or {}
+        indicators = d.get("indicators") or _extract_indicators_from_tool_outputs(d)
         bars_recent = _extract_bars_recent(d)
         portfolio_snapshot = _extract_portfolio_snapshot(d)
 

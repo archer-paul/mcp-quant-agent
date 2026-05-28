@@ -194,6 +194,63 @@ def log_decision(
         logger.warning("Failed to log decision to Langfuse: %s", exc)
 
 
+def log_pm_decision(
+    *,
+    run_id: str,
+    t_now: str,
+    model: str,
+    tickers: list[str],
+    reports: list[dict[str, Any]],
+    discussion: list[dict[str, Any]],
+    portfolio: dict[str, Any],
+    tool_outputs: list[dict[str, Any]],
+    mcp_calls: list[dict[str, Any]],
+    rationale: str,
+    target_weights: dict[str, Any],
+    orders: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Log one global Portfolio Manager smoke decision to Langfuse."""
+    client = get_langfuse_client()
+    if client is None:
+        return
+    try:
+        meta = {
+            "mode": "pm_api_smoke",
+            "run_id": run_id,
+            "model": model,
+            "tickers": tickers,
+            "t_now": t_now,
+        }
+        if metadata:
+            meta.update(metadata)
+
+        with client.start_as_current_observation(
+            name=f"pm-decision-{t_now}",
+            as_type="agent",
+            input={
+                "t_now": t_now,
+                "tickers": tickers,
+                "reports": reports,
+                "discussion": discussion or [],
+                "portfolio": portfolio,
+                "tool_outputs": tool_outputs,
+                "mcp_calls": mcp_calls,
+            },
+            output={
+                "rationale": rationale,
+                "target_weights": target_weights,
+                "orders": orders,
+                "fills": fills,
+            },
+            metadata=meta,
+        ):
+            pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to log PM decision to Langfuse: %s", exc)
+
+
 def score_trace(
     trace_id: str,
     name: str,
