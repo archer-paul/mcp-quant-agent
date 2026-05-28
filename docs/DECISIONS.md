@@ -154,6 +154,120 @@ holds). The non-zero unfaithful count under v2 is concentrated in non-trim sells
 
 ---
 
+### 2026-05-28 — AUDIT: non-trim sell decomposition (pre-annotation, offline)
+
+**Context:** V2 faithfulness = 0.671. Dominant finding: 613 holds where v2 judge predicts
+SELL (74% of 825 unfaithful). User hypothesised these might be appreciation-drift artifacts
+(symmetric to the v1 at-target-hold bug). Offline audit run with
+`scripts/audit_non_trim_sells.py` on cached decisions — **no API calls**.
+
+#### Q1 — Ticker × regime decomposition
+
+| Ticker | Total | Bear | Bull | High_vol | Range |
+|--------|-------|------|------|----------|-------|
+| AAPL | 45 | 18 | 17 | 7 | 3 |
+| JPM | 83 | 12 | 46 | 6 | 19 |
+| MSFT | 16 | 2 | 7 | 0 | 7 |
+| NVDA | **409** | 63 | **243** | 75 | 28 |
+| XOM | 60 | 6 | 45 | 3 | 6 |
+| **TOTAL** | **613** | **101** | **358** | **91** | **63** |
+
+NVDA dominates: **409/613 = 67%**. Bull regime dominates: 358/613 = 58%.
+NVDA's +980% appreciation (Jul 2022 → Jun 2024) drives the concentration.
+
+#### Q2 — Appreciation drift vs buy-push
+
+Classification rule: look back to the agent's most recent BUY for this ticker.
+If position % at that BUY was ≥ 18%, it is "buy-push" (agent entered near cap, never exited).
+If position % at last BUY was < 18%, it is "appreciation drift" (passive run-up).
+
+| Category | N | % | Policy status |
+|----------|---|---|---------------|
+| **Buy-push** (pos ≥ 18% at last buy) | **611** | **99.7%** | Real cap-management gap |
+| **Appreciation drift** (pos < 18% at last buy) | **2** | **0.3%** | Policy-silent → coherent |
+| No prior buy | 0 | 0% | Edge case |
+
+**Key finding: the user's appreciation-drift hypothesis is WRONG.** Only 2 of 613 are pure
+drift. The other 611 represent cases where the agent actively bought positions to near-cap
+levels (≥ 18%), which then exceeded 20%, and the agent never trimmed.
+
+Drift breakdown by ticker: AAPL=1 (bear), XOM=1 (high_vol).
+
+#### Q3 — Policy check: does SYSTEM_PROMPT require trimming?
+
+Four relevant SYSTEM_PROMPT quotes:
+1. "Target 10–15% of NAV per position. Hard cap: 20% of NAV per position."
+   → Establishes the constraint, doesn't specify how to enforce it after entry.
+2. "BUY quantity formula: `additional_value = min(target_value, 0.20 × NAV - existing_value)`"
+   → 20% limit is in the BUY formula only — entry constraint, not ongoing maintenance.
+3. "SELL quantity: use position size from the portfolio (sell entire position, or a partial fraction)."
+   → SELL instruction is purely mechanical. No trigger condition about exceeding % of NAV.
+4. "Single position MUST NOT exceed 20% of portfolio NAV."
+   → Imperative, but no instruction to trim if exceeded by appreciation or buy-drift.
+
+**Conclusion:** SYSTEM_PROMPT is ambiguous. The cap is enforced structurally at BUY by the
+engine formula. There is **no explicit trim instruction** for positions that grow above 20%.
+However, "MUST NOT exceed" is an imperative that could be read as ongoing maintenance.
+
+For the thesis, this is treated as follows:
+- The 611 buy-push cases are **unfaithful** (the agent bought aggressively to near-cap, 
+  position exceeded 20%, agent never acted — the v2 judge's "SELL when pos >> 20%" 
+  instruction is reasonable given the imperative language in the spec).
+- The 2 drift cases are **reclassified as coherent** (policy-silent — agent never bought 
+  the position above 18%, drift is passive, and no trim instruction exists).
+
+#### Proposed V3 reclassification and faithfulness impact
+
+| Category | N | V3 treatment |
+|----------|---|--------------|
+| Appreciation drift | 2 | → faithful (policy-silent) |
+| Buy-push above cap | 611 | → stays unfaithful |
+| True D1 gaps | 8 | → stays unfaithful |
+| Other action mismatches | 204 | → stays unfaithful |
+| **Total unfaithful** | **823** | |
+
+V3 faithfulness = (2505 − 823) / 2505 = **0.6715** (vs V2 = 0.6707, Δ = +0.0008).
+
+**Decision:** V3 reclassification is negligible. **V2 = 0.671 remains the canonical number.**
+No code changes required. Annotation sample is unchanged.
+
+#### Characterisation of 204 "other" unfaithful
+
+| Judge predicts | Agent action | N | Interpretation |
+|----------------|-------------|---|----------------|
+| hold | buy | 122 | Aggressive buying when judge says hold; early bull days (all 5 tickers buy on 2022-07-01 in bear regime) |
+| sell | buy | 56 | Agent buys ABOVE CAP (pos ≥ 20%) while judge says sell — genuine cap-breach pattern, mostly AAPL 2022-07-14 to 07-18 |
+| hold | sell | 25 | Early exits — agent sells small positions (pos ~9%) when judge says hold |
+| buy | sell | 1 | Rare: agent sells when judge says buy |
+
+Notable: the 56 "sell→buy" cases include multiple consecutive AAPL decisions at pos=20.4–20.5%
+NAV where the agent *bought above the hard cap* (2022-07-14 to 07-18). This suggests the
+engine's cap enforcement had a transient bug early in Run #4, or the agent's BUY formula
+used stale price data during the initial portfolio build.
+
+The 122 "hold→buy" cases are primarily the run's opening days: the agent opens positions
+in all 5 tickers simultaneously despite being in a bear regime — judged by the v2 judge as
+"hold" (bearish conditions), but the agent buys. This is coherent as portfolio initialisation
+behaviour but is correctly flagged as unfaithful relative to the v2 policy.
+
+#### Summary table (for thesis Chapter 4)
+
+| Category | N | % of 825 | Policy verdict |
+|----------|---|----------|----------------|
+| Non-trim sell: buy-pushed above cap | 611 | 74% | Unfaithful (real cap-mgmt gap) |
+| Non-trim sell: appreciation drift | 2 | 0% | Reclassified coherent (V3) |
+| True D1 gaps (confirmed) | 8 | 1% | Unfaithful |
+| Other: hold→buy (aggressive entry) | 122 | 15% | Unfaithful |
+| Other: sell→buy (buys above cap) | 56 | 7% | Unfaithful |
+| Other: hold→sell (early exit) | 25 | 3% | Unfaithful |
+| Other: buy→sell (rare) | 1 | 0% | Unfaithful |
+| **Total unfaithful (V2)** | **825** | **100%** | |
+
+**Files:** `scripts/audit_non_trim_sells.py` (offline, no API calls). Output to stdout only
+(no new result files — the 613 non-trim cases were already in `non_trim_sells.csv`).
+
+---
+
 ### 2026-05-28 — Run #4 VALID: final results
 
 **Run:** `gpt-4-1-mini_20260528_112645`. Period: 2022-07-01 → 2024-06-30. **VALID.**
