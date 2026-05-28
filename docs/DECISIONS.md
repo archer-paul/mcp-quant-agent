@@ -93,19 +93,51 @@ for bearish/uncertain signals even with pos < 10% + cash available. The keyword 
 (banned in §3 of HANDOVER.md) would have made the same error the v1 judge made — checking
 rationale language instead of the actual market evidence the judge sees.
 
-#### Actual v2 results (filled after recalculation — see below)
+#### Actual v2 results — computed 2026-05-28
 
-| Metric | V1 (max-deploy) | V2 (policy-aware) | Delta |
-|--------|----------------|-------------------|-------|
-| faithfulness | 0.281 | _TBD_ | _TBD_ |
-| faithfulness_strict | 0.372 | _TBD_ | _TBD_ |
-| n_faithful | 705 | _TBD_ | _TBD_ |
-| n_unfaithful | 1189 | _TBD_ | _TBD_ |
-| n_constrained | 611 | _TBD_ | _TBD_ |
-| Non-trim sells | — | _TBD_ | — |
-| D1 gaps | — | _TBD_ | — |
+| Regime | n | V1 faith | V1 strict | V1 unf | V1 con | V2 faith | V2 strict | V2 unf | V2 con | Δfaith |
+|--------|---|---------|---------|--------|--------|---------|---------|--------|--------|--------|
+| bear | 513 | 0.429 | 0.533 | 193 | 100 | **0.731** | 0.731 | 138 | 0 | +0.302 |
+| bull | 1109 | 0.159 | 0.235 | 574 | 359 | **0.576** | 0.576 | 470 | 0 | +0.418 |
+| high_vol | 509 | 0.330 | 0.403 | 249 | 92 | **0.721** | 0.721 | 142 | 0 | +0.391 |
+| range | 374 | 0.316 | 0.379 | 193 | 63 | **0.799** | 0.799 | 75 | 0 | +0.484 |
+| **OVERALL** | **2505** | **0.272** | **0.361** | **1209** | **614** | **0.671** | **0.671** | **825** | **0** | **+0.399** |
 
-*(Numbers filled after `scripts/step3_dual_faithfulness.py` completes.)*
+| Count | V1 | V2 | Delta |
+|-------|-----|-----|-------|
+| n_faithful | 682 | 1680 | +998 |
+| n_unfaithful | 1209 | 825 | −384 |
+| n_constrained | 614 | **0** | −614 |
+| judge_fail | 0 | 0 | 0 |
+
+**V2 constrained = 0** (structural finding): The policy-aware judge predicts "hold" for
+bucket A (cash < 1%), bucket B (pos >= 19%), and bucket C (pos 10–19%) cases itself,
+because it knows the policy. These become `faithful` (judge=hold, agent=hold) rather
+than needing a constrained override. The `_is_constrained_hold_v2` safety net fires for
+0 cases — the prompt does its job.
+
+**Non-trim sells (Condition 3):**
+613 decisions where v2 judge predicts SELL but agent holds. All 613 → unfaithful.
+By regime: bull=358 (58%), bear=101 (16%), high_vol=91 (15%), range=63 (10%).
+Concentrated in positions above 20% NAV with bullish indicators — the agent builds
+positions aggressively but does not trim when they exceed the hard cap. This is the
+**dominant source of unfaithfulness** (613/825 = 74% of all unfaithful decisions).
+Not present in v1 results: v1's case-3 constrained check (pos >= 18% + judge=sell)
+silently absorbed all 608 of these as "constrained" — hiding the finding entirely.
+
+**True D1 gaps (Condition 1):** 8 decisions (pos < 10%, cash >= 1%, judge=buy, agent holds).
+Regime breakdown: bear=4, bull=2, range=2, high_vol=0. Negligible (8/825 = 1%).
+For reference, keyword-grep would have estimated 3 — LLM judge found 8 (more nuanced).
+
+**Verdict movements V1 → V2:**
+| Transition | N | Interpretation |
+|------------|---|----------------|
+| unfaithful → faithful | 1086 | False positives removed (at-target/cash-forced holds) |
+| constrained → unfaithful | 608 | Non-trim sell gaps exposed (were hidden as "constrained") |
+| faithful → unfaithful | 94 | Genuinely wrong under stricter v2 policy |
+| unfaithful → unfaithful | 123 | True persistent gaps (buy/other mismatches) |
+| faithful → faithful | 588 | Correctly classified by both judges |
+| constrained → faithful | 6 | Capacity-constrained now handled by judge prompt |
 
 **Decision:** Use v2 as the canonical faithfulness metric for the thesis.
 Keep v1 available via `policy_aware=False` flag in `compute_faithfulness_llm` for

@@ -221,50 +221,90 @@ for d in decisions:
 
 # ---------------------------------------------------------------------------
 # Sampling strategy — target ~80 rows
+# Designed for tractable manual annotation, stratified across verdict categories.
+#
+# Categories (with target counts):
+#   [1] All D1 gaps (pos<10%, judge=buy)                    all  (~8)
+#   [2] Non-trim sell sample (judge=sell, pos>0)            15 rows (stratified by regime)
+#   [3] Other unfaithful (not D1, not non-trim sell)        12 rows
+#   [4] verdict changed: constrained→unfaithful             10 rows (non-trim confirms)
+#   [5] verdict changed: unfaithful→faithful (reclassified) 15 rows (check correctness)
+#   [6] Persistent faithful (faithful in both judges)       10 rows
+#   [7] Persistent unfaithful (unfaithful in both judges)   10 rows
+#   Total target: ~80 rows
 # ---------------------------------------------------------------------------
+
+from collections import defaultdict
 
 rng = random.Random(42)
 
-v2_unfaithful = [r for r in rows if r["verdict_new_judge"] == "unfaithful"]
-v2_faithful = [r for r in rows if r["verdict_new_judge"] == "faithful"]
-v2_constrained = [r for r in rows if r["verdict_new_judge"] == "constrained"]
-verdict_changed = [r for r in rows if r["verdict_changed"]]
+# Categorise rows
+d1_gaps = [r for r in rows
+           if r["verdict_new_judge"] == "unfaithful"
+           and r["bucket"] == "D"
+           and r["v2_judge_predicted"] == "buy"]
 
-# All unfaithful (expected to be small under v2)
-sample = list(v2_unfaithful)
+non_trim_sells = [r for r in rows
+                  if r["verdict_new_judge"] == "unfaithful"
+                  and r["v2_judge_predicted"] == "sell"
+                  and r["action"] == "hold"]
 
-# All verdict-changed cases not already in sample
-changed_new = [r for r in verdict_changed if r not in sample]
-sample += changed_new
+other_unfaithful = [r for r in rows
+                    if r["verdict_new_judge"] == "unfaithful"
+                    and r not in d1_gaps
+                    and r not in non_trim_sells]
 
-# Fill remaining up to 80 rows with stratified faithful/constrained
-target = 80
-remaining = target - len(sample)
-if remaining > 0:
-    # Split evenly between faithful and constrained
-    faith_n = min(remaining // 2, len(v2_faithful))
-    con_n = min(remaining - faith_n, len(v2_constrained))
-    faith_n = min(target - len(sample) - con_n, len(v2_faithful))
+con_to_unf = [r for r in rows
+              if r["verdict_old_judge"] == "constrained"
+              and r["verdict_new_judge"] == "unfaithful"]
 
-    # Stratify faithful by regime
-    from collections import defaultdict
-    faith_by_regime: dict = defaultdict(list)
-    for r in v2_faithful:
-        faith_by_regime[r["regime"]].append(r)
-    faith_sample = []
-    per_regime = max(1, faith_n // len(faith_by_regime))
-    for regime_rows in faith_by_regime.values():
-        rng.shuffle(regime_rows)
-        faith_sample += regime_rows[:per_regime]
-    faith_sample = faith_sample[:faith_n]
+unf_to_faith = [r for r in rows
+                if r["verdict_old_judge"] == "unfaithful"
+                and r["verdict_new_judge"] == "faithful"]
 
-    con_sample = rng.sample(v2_constrained, min(con_n, len(v2_constrained)))
+persistent_faithful = [r for r in rows
+                       if r["verdict_old_judge"] == "faithful"
+                       and r["verdict_new_judge"] == "faithful"]
 
-    added = set(id(r) for r in sample)
-    for r in faith_sample + con_sample:
+persistent_unfaithful = [r for r in rows
+                         if r["verdict_old_judge"] == "unfaithful"
+                         and r["verdict_new_judge"] == "unfaithful"]
+
+
+def _regime_stratify(pool: list, n: int, seed_rng: random.Random) -> list:
+    """Sample n items from pool, stratified by regime."""
+    by_regime: dict = defaultdict(list)
+    shuffled = list(pool)
+    seed_rng.shuffle(shuffled)
+    for r in shuffled:
+        by_regime[r["regime"]].append(r)
+    result = []
+    per_r = max(1, n // max(len(by_regime), 1))
+    for rr in by_regime.values():
+        result += rr[:per_r]
+    # top up from any regime if needed
+    extra = [r for r in shuffled if r not in result]
+    result += extra[:max(0, n - len(result))]
+    return result[:n]
+
+
+sample: list[dict] = []
+added: set[int] = set()
+
+def _add(items: list, max_n: int | None = None) -> None:
+    subset = items if max_n is None else items[:max_n]
+    for r in subset:
         if id(r) not in added:
             sample.append(r)
             added.add(id(r))
+
+_add(d1_gaps)                                              # [1] all D1 gaps
+_add(_regime_stratify(non_trim_sells, 15, rng))            # [2] non-trim sample
+_add(rng.sample(other_unfaithful, min(12, len(other_unfaithful))))  # [3] other unfaithful
+_add(rng.sample(con_to_unf, min(10, len(con_to_unf))))    # [4] constrained→unfaithful
+_add(rng.sample(unf_to_faith, min(15, len(unf_to_faith))))  # [5] unfaithful→faithful
+_add(rng.sample(persistent_faithful, min(10, len(persistent_faithful))))  # [6]
+_add(rng.sample(persistent_unfaithful, min(10, len(persistent_unfaithful))))  # [7]
 
 # Sort by date, ticker for readability
 sample.sort(key=lambda r: (r["date"] or "", r["ticker"] or ""))
