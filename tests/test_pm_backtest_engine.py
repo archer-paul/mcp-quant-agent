@@ -159,12 +159,15 @@ def test_pm_engine_writes_decisions_jsonl(tmp_path: Path) -> None:
     results = _run_engine(write_artifacts=True, output_root=tmp_path)
     jsonl_path = tmp_path / "runs" / results["run_id"] / "decisions.jsonl"
     summary_path = tmp_path / "results" / results["run_id"] / "summary.csv"
+    memory_path = tmp_path / "runs" / results["run_id"] / "pm_decision_log.md"
 
     assert jsonl_path.exists()
     assert summary_path.exists()
+    assert memory_path.exists()
     rows = [json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == results["n_decisions"]
     assert rows[0]["reports"]
+    assert "ret=" in memory_path.read_text(encoding="utf-8")
 
 
 def test_pm_engine_loads_prices_from_existing_cache_without_fetch(
@@ -360,6 +363,73 @@ def test_pm_api_smoke_path_runs_with_mock_backbone_and_writes_artifacts(
     grounding = compute_grounding([decision])
     assert grounding["n_claims_total"] >= 2
     assert grounding["n_grounded"] >= 2
+
+
+def test_pm_decision_log_causal_chain_on_3_dates(tmp_path: Path) -> None:
+    """PMDecisionLog must build a strictly causal chain over 3 consecutive dates.
+
+    Anti-lookahead contract:
+    - After date D1 is processed, it is stored as "pending" (no realized return yet).
+    - At date D2 start, D1's realized return is computed and D1 becomes resolved.
+    - get_past_context(t_now="D2") returns only D1 (resolved, date < D2).
+    - At date D3 start, D2 is resolved.
+    - get_past_context(t_now="D3") returns D1 and D2.
+    - pm_decision_log.md must have zero entries with "pending" status after the run
+      (the last entry stays pending since D4 never arrives).
+    """
+    # 3 dates: 2022-02-07, 2022-02-08, 2022-02-09
+    engine = PMBacktestEngine(
+        tickers=["AAPL"],
+        start_date="2022-02-07",
+        end_date="2022-02-09",
+        price_data={
+            "AAPL": _make_price_rows(
+                start="2022-01-01",
+                n=45,
+                start_close=100.0,
+                step=1.0,
+            )
+        },
+        news_data={"AAPL": []},
+        allow_empty_news=True,
+        write_artifacts=True,
+        output_root=tmp_path,
+        run_id="causal_chain_test",
+    )
+    results = engine.run()
+    assert results["n_decisions"] == 3, "Expected 3 PM decisions (3 dates)"
+
+    log_path = tmp_path / "runs" / "causal_chain_test" / "pm_decision_log.md"
+    assert log_path.exists(), "pm_decision_log.md should be written when write_artifacts=True"
+
+    raw = log_path.read_text(encoding="utf-8")
+
+    # The first 2 entries should be resolved (ret= tag), the last is still pending
+    # because no D4 was processed to provide D3's realized return.
+    pending_count = raw.count("| pending]")
+    resolved_count = raw.count("| ret=")
+    assert pending_count == 1, f"Expected exactly 1 pending entry (last date), got {pending_count}"
+    assert resolved_count == 2, f"Expected 2 resolved entries (D1+D2), got {resolved_count}"
+
+    # Dates must appear in chronological order in the file
+    pos_07 = raw.find("2022-02-07")
+    pos_08 = raw.find("2022-02-08")
+    pos_09 = raw.find("2022-02-09")
+    assert pos_07 < pos_08 < pos_09, "Log entries should be chronological"
+
+    # Anti-lookahead: the resolved entries' ret= values must reflect
+    # the correct price direction (AAPL goes up by 1.0/day → positive returns)
+    from mcp_quant_agent.agents.pm_memory import PMDecisionLog
+    log = PMDecisionLog(log_path=log_path)
+    log.load_from_file()
+    resolved = [e for e in log._entries if not e["pending"]]
+    assert len(resolved) == 2
+    for entry in resolved:
+        returns = entry["realized_returns"]
+        if returns:  # AAPL is always in the portfolio by then
+            aapl_ret = returns.get("AAPL", 0.0)
+            # Price goes up 1.0 per day from 100.0 → ~1% return per day
+            assert aapl_ret > 0, f"Expected positive return, got {aapl_ret}"
 
 
 def test_pm_api_smoke_parse_failure_records_explicit_all_cash_error(tmp_path: Path) -> None:

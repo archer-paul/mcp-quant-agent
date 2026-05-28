@@ -58,6 +58,36 @@ logger = logging.getLogger(__name__)
 # Shared helpers for extracting raw data from decisions.jsonl
 # ---------------------------------------------------------------------------
 
+_REGIME_PRIORITY: dict[str, int] = {
+    "high_vol": 0,
+    "bear": 1,
+    "range": 2,
+    "bull": 3,
+}
+
+
+def _extract_decision_regime(decision: dict[str, Any]) -> str | None:
+    """Return a single regime label for a decision, handling both schemas.
+
+    Single-agent decisions store ``regime: str | None`` directly.
+    PM decisions store ``regimes: {ticker: str | None}`` and have
+    ``mode == "multi_agent_pm"``.  For PM decisions the worst-case regime is
+    used (priority: high_vol > bear > range > bull) — consistent with the
+    detector's own priority order and conservative for risk reporting.
+
+    Returns ``None`` for warm-up bars with insufficient price history.
+    ``None`` decisions are excluded from regime-segmented eval tables but
+    counted separately so the exclusion is transparent.
+    """
+    if decision.get("mode") == "multi_agent_pm":
+        regimes_dict = decision.get("regimes") or {}
+        labels = [v for v in regimes_dict.values() if v is not None]
+        if not labels:
+            return None
+        return str(min(labels, key=lambda r: _REGIME_PRIORITY.get(str(r), 99)))
+    raw = decision.get("regime")
+    return str(raw) if raw is not None else None
+
 
 def _extract_portfolio_snapshot(decision: dict[str, Any]) -> dict[str, Any]:
     """Return portfolio raw values from the tool_outputs field (new schema).
@@ -1030,6 +1060,218 @@ def compute_sophistication(
 
 
 # ---------------------------------------------------------------------------
+# 3b. PM multi-agent faithfulness
+# ---------------------------------------------------------------------------
+
+_SIGNAL_DIRECTION: dict[str, int] = {"bullish": 1, "neutral": 0, "bearish": -1}
+_ROLE_WEIGHT_PM: dict[str, float] = {"technical": 0.55, "news": 0.25, "risk": 0.20}
+
+
+def _pm_analyst_consensus(
+    reports: list[dict[str, Any]],
+    ticker: str,
+) -> float:
+    """Weighted directional consensus for one ticker from PM analyst reports.
+
+    Returns a float in [-1, 1]:
+      +1 = strongly bullish consensus
+      -1 = strongly bearish consensus
+       0 = neutral
+    """
+    score = 0.0
+    for report in reports:
+        if str(report.get("ticker", "")).upper() != ticker.upper():
+            continue
+        role = str(report.get("analyst", "technical"))
+        signal = str(report.get("signal", "neutral"))
+        confidence = float(report.get("confidence", 0.5))
+        role_weight = _ROLE_WEIGHT_PM.get(role, 0.33)
+        score += role_weight * _SIGNAL_DIRECTION.get(signal, 0) * confidence
+    return max(-1.0, min(1.0, score))
+
+
+def _pm_weight_direction(
+    target_weight: float,
+    previous_weight: float,
+    tolerance: float = 0.01,
+) -> int:
+    """Classify PM weight change direction: +1=increase, 0=hold, -1=decrease."""
+    delta = target_weight - previous_weight
+    if delta > tolerance:
+        return 1
+    if delta < -tolerance:
+        return -1
+    return 0
+
+
+def _pm_constrained_hold(
+    *,
+    ticker: str,
+    target_weight: float,
+    previous_weight: float,
+    gross_target: float,
+    portfolio_snapshot: dict[str, Any],
+    consensus: float = 0.0,
+    tolerance: float = 0.01,
+) -> bool:
+    """True if the PM's failure to adjust is explained by a portfolio constraint.
+
+    Three PM-level constrained cases:
+    A. Gross target exposure >= 95%: cash is insufficient to add more — 'constrained-full'.
+    B. Previous weight for this ticker >= 40%: already highly concentrated.
+    C. Previous weight = 0 and consensus is bearish: can't reduce below zero
+       (structural impossibility, symmetric to single-agent's 'qty=0 sell blocked').
+    """
+    if _pm_weight_direction(target_weight, previous_weight, tolerance) != 0:
+        return False  # PM did adjust — not a constrained hold
+    nav = float(portfolio_snapshot.get("nav", 1.0)) or 1.0
+    cash = float(portfolio_snapshot.get("cash", 0.0))
+    cash_pct = cash / nav if nav > 0 else 0.0
+    if cash_pct < 0.05:
+        return True  # Case A: less than 5% cash left — can't rebalance
+    if previous_weight >= 0.40:
+        return True  # Case B: already highly concentrated
+    # Case C: no position and bearish consensus — can't short
+    return previous_weight <= tolerance and consensus < -0.10
+
+
+def compute_pm_faithfulness(
+    decisions: list[dict[str, Any]],
+    tolerance: float = 0.01,
+    _analyst_consensus_fn: Any = None,
+) -> dict[str, Any]:
+    """Faithfulness metric for PM multi-agent decisions.
+
+    Measures whether each PM target-weight direction (increase / hold / decrease)
+    per ticker is consistent with the analyst consensus signal for that ticker.
+
+    This replaces the per-decision ``action=buy/sell/hold`` framework of
+    single-agent faithfulness with a weight-direction framing appropriate for
+    the portfolio-manager architecture.
+
+    Faithfulness criterion (per ticker per date):
+    - consensus > +0.10 AND target weight increased → faithful
+    - consensus < -0.10 AND target weight decreased → faithful
+    - consensus in [-0.10, +0.10] AND weight unchanged → faithful (neutral hold)
+    - direction and consensus misalign → unfaithful
+    - constrained hold (near-full, concentration) → constrained
+
+    Consecutive dates are required to compute weight changes. The first
+    decision is skipped (no previous weight to compare against).
+
+    Parameters
+    ----------
+    decisions:
+        PM JSONL decisions (must all be ``mode == "multi_agent_pm"``).
+    tolerance:
+        Minimum absolute weight change to count as a direction (default 1%).
+    _analyst_consensus_fn:
+        Test hook — callable(reports, ticker) → float.
+
+    Returns
+    -------
+    dict with keys: ``pm_faithfulness``, ``n_scoreable``, ``n_faithful``,
+    ``n_unfaithful``, ``n_constrained``, ``by_ticker``, ``examples_unfaithful``.
+    """
+    _consensus_fn = _analyst_consensus_fn or _pm_analyst_consensus
+
+    pm_only = [d for d in decisions if d.get("mode") == "multi_agent_pm"]
+    pm_only = sorted(pm_only, key=lambda d: str(d.get("date", "")))
+
+    n_faithful = 0
+    n_unfaithful = 0
+    n_constrained = 0
+    by_ticker: dict[str, dict[str, int]] = {}
+    examples_unfaithful: list[dict[str, Any]] = []
+
+    prev_weights: dict[str, float] = {}  # ticker → weight from previous date
+
+    for dec in pm_only:
+        date = str(dec.get("date", ""))
+        targets = dec.get("targets") or {}
+        weights: dict[str, float] = {
+            str(t).upper(): float(w)
+            for t, w in (targets.get("weights") or {}).items()
+        }
+        gross = sum(weights.values())
+        reports = dec.get("reports") or []
+        portfolio_before = dec.get("portfolio_before") or {}
+
+        if not prev_weights:
+            # First decision — no comparison possible; set baseline
+            prev_weights = dict.fromkeys(weights, 0.0)
+            prev_weights.update(weights)
+            continue
+
+        for ticker in set(weights) | set(prev_weights):
+            target_weight = weights.get(ticker, 0.0)
+            previous_weight = prev_weights.get(ticker, 0.0)
+            direction = _pm_weight_direction(target_weight, previous_weight, tolerance)
+            consensus = float(_consensus_fn(reports, ticker))
+
+            # Direction classification
+            bullish = consensus > 0.10
+            bearish = consensus < -0.10
+
+            if direction == 1 and bullish or direction == -1 and bearish:
+                verdict = "faithful"
+            elif direction == 0 and not bullish and not bearish:
+                verdict = "faithful"  # neutral consensus → hold is rational
+            elif direction == 0 and _pm_constrained_hold(
+                ticker=ticker,
+                target_weight=target_weight,
+                previous_weight=previous_weight,
+                gross_target=gross,
+                portfolio_snapshot=portfolio_before,
+                consensus=consensus,
+                tolerance=tolerance,
+            ):
+                verdict = "constrained"
+            else:
+                verdict = "unfaithful"
+
+            ticker_stats = by_ticker.setdefault(
+                ticker, {"n_faithful": 0, "n_unfaithful": 0, "n_constrained": 0}
+            )
+            ticker_stats[f"n_{verdict}"] = ticker_stats.get(f"n_{verdict}", 0) + 1
+
+            if verdict == "faithful":
+                n_faithful += 1
+            elif verdict == "constrained":
+                n_constrained += 1
+            else:
+                n_unfaithful += 1
+                if len(examples_unfaithful) < 10:
+                    examples_unfaithful.append(
+                        {
+                            "date": date,
+                            "ticker": ticker,
+                            "consensus": round(consensus, 3),
+                            "direction": direction,
+                            "target_weight": round(target_weight, 4),
+                            "previous_weight": round(previous_weight, 4),
+                        }
+                    )
+
+        prev_weights = {ticker: weights.get(ticker, 0.0) for ticker in set(weights) | set(prev_weights)}
+
+    n_scoreable = n_faithful + n_unfaithful + n_constrained
+    pm_faith = n_faithful / n_scoreable if n_scoreable > 0 else 0.0
+    n_strict_denom = n_faithful + n_unfaithful
+    pm_faith_strict = n_faithful / n_strict_denom if n_strict_denom > 0 else 0.0
+    return {
+        "pm_faithfulness": round(pm_faith, 4),
+        "pm_faithfulness_strict": round(pm_faith_strict, 4),
+        "n_scoreable": n_scoreable,
+        "n_faithful": n_faithful,
+        "n_unfaithful": n_unfaithful,
+        "n_constrained": n_constrained,
+        "by_ticker": by_ticker,
+        "examples_unfaithful": examples_unfaithful,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 4. Regime segmentation
 # ---------------------------------------------------------------------------
 
@@ -1037,11 +1279,22 @@ def compute_sophistication(
 def _segment_by_regime(
     decisions: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group decisions by regime label."""
+    """Group decisions by regime label.
+
+    Decisions with no regime (warm-up bars, insufficient price history) are
+    collected under the key ``"__warmup__"`` so they are visible in the output
+    but excluded from the primary regime-segmented eval tables.  This prevents
+    a spurious ``"unknown"`` row that inflates faithfulness for warm-up decisions.
+
+    Both single-agent (``decision["regime"]``) and PM (``decision["regimes"]``
+    per ticker, worst-case aggregated) schemas are handled via
+    ``_extract_decision_regime``.
+    """
     groups: dict[str, list[dict[str, Any]]] = {}
     for d in decisions:
-        regime = str(d.get("regime") or "unknown")
-        groups.setdefault(regime, []).append(d)
+        regime = _extract_decision_regime(d)
+        key = regime if regime is not None else "__warmup__"
+        groups.setdefault(key, []).append(d)
     return groups
 
 
@@ -1075,9 +1328,13 @@ def compute_all_reasoning_metrics(
         ``overall``, ``by_regime``, ``faithfulness_detail``,
         ``grounding_detail``, ``sophistication_detail``, ``summary_table``.
     """
-    regimes = _segment_by_regime(decisions)
+    all_segments = _segment_by_regime(decisions)
+    # Warm-up decisions (no regime label) are excluded from regime tables but
+    # their count is surfaced in the summary for transparency.
+    warmup_decisions = all_segments.pop("__warmup__", [])
+    regimes = all_segments
 
-    # Overall metrics
+    # Overall metrics (ALL decisions including warmup; consistent with thesis run)
     faith_overall = compute_faithfulness_llm(decisions, judge_model=judge_model, seed=seed)
     ground_overall = compute_grounding(decisions)
     soph_overall = compute_sophistication(
@@ -1085,7 +1342,7 @@ def compute_all_reasoning_metrics(
         max_decisions=max_sophistication_per_regime, seed=seed,
     )
 
-    # Per-regime metrics
+    # Per-regime metrics (warm-up excluded from table)
     by_regime: dict[str, dict[str, Any]] = {}
     for regime, rdecs in sorted(regimes.items()):
         faith = compute_faithfulness_llm(rdecs, judge_model=judge_model, seed=seed)
@@ -1152,4 +1409,5 @@ def compute_all_reasoning_metrics(
         "grounding_detail": ground_overall,
         "sophistication_detail": soph_overall,
         "summary_table": {"header": header, "rows": rows},
+        "n_warmup_excluded": len(warmup_decisions),
     }

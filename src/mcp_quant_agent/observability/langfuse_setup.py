@@ -209,22 +209,47 @@ def log_pm_decision(
     target_weights: dict[str, Any],
     orders: list[dict[str, Any]],
     fills: list[dict[str, Any]],
+    past_context: str = "",
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Log one global Portfolio Manager smoke decision to Langfuse."""
+    """Log one PM decision to Langfuse with hierarchical analyst spans.
+
+    Trace structure (Langfuse v4 nested observations):
+    ::
+
+        pm-decision-{t_now}   [agent, parent]
+          ├── analyst-technical  [span]
+          ├── analyst-news       [span]
+          ├── analyst-risk       [span]
+          ├── investment-debate  [span, one turn each]
+          ├── research-manager   [span]
+          ├── trader             [span]
+          ├── risk-debate        [span, one turn each]
+          └── portfolio-manager  [span, final allocation]
+
+    The ``past_context`` injected into prompts is recorded in the parent's
+    input so the memory layer is visible in the Langfuse UI.
+    """
     client = get_langfuse_client()
     if client is None:
         return
     try:
         meta = {
-            "mode": "pm_api_smoke",
+            "mode": "pm_multi_agent",
             "run_id": run_id,
             "model": model,
             "tickers": tickers,
             "t_now": t_now,
+            "has_past_context": bool(past_context),
         }
         if metadata:
             meta.update(metadata)
+
+        # Build role → report list for analyst child spans
+        reports_by_role: dict[str, list[dict[str, Any]]] = {}
+        for rpt in reports:
+            role = str(rpt.get("analyst", "unknown"))
+            reports_by_role.setdefault(role, []).append(rpt)
 
         with client.start_as_current_observation(
             name=f"pm-decision-{t_now}",
@@ -232,11 +257,9 @@ def log_pm_decision(
             input={
                 "t_now": t_now,
                 "tickers": tickers,
-                "reports": reports,
-                "discussion": discussion or [],
                 "portfolio": portfolio,
-                "tool_outputs": tool_outputs,
                 "mcp_calls": mcp_calls,
+                "past_context_preview": past_context[:500] if past_context else "",
             },
             output={
                 "rationale": rationale,
@@ -246,7 +269,64 @@ def log_pm_decision(
             },
             metadata=meta,
         ):
-            pass
+            # Child spans for analyst reports
+            for role in ("technical", "news", "risk"):
+                role_reports = reports_by_role.get(role, [])
+                role_tool_outputs = [
+                    o for o in tool_outputs if str(o.get("tool", "")) in {
+                        "get_price_history", "compute_indicators", "get_current_regime",
+                        "get_news_items_cache_first", "get_portfolio",
+                    }
+                ]
+                with client.start_as_current_observation(
+                    name=f"analyst-{role}",
+                    as_type="span",
+                    input={
+                        "role": role,
+                        "tickers": tickers,
+                        "tool_outputs_count": len(role_tool_outputs),
+                    },
+                    output={"reports": role_reports},
+                ):
+                    pass
+
+            # Child spans for discussion turns (investment debate, RM, trader, risk)
+            stage_order = [
+                "investment_debate",
+                "research_manager",
+                "trader",
+                "risk_debate",
+            ]
+            stage_turns: dict[str, list[dict[str, Any]]] = {}
+            for turn in (discussion or []):
+                stage = str(turn.get("stage", "discussion"))
+                stage_turns.setdefault(stage, []).append(turn)
+
+            for stage in stage_order:
+                turns = stage_turns.get(stage, [])
+                if not turns:
+                    continue
+                speakers = [str(t.get("speaker", "")) for t in turns]
+                with client.start_as_current_observation(
+                    name=stage,
+                    as_type="span",
+                    input={"speakers": speakers, "n_turns": len(turns)},
+                    output={"turns": turns},
+                ):
+                    pass
+
+            # Final PM allocation span
+            with client.start_as_current_observation(
+                name="portfolio-manager",
+                as_type="span",
+                input={"tickers": tickers, "portfolio_nav": portfolio.get("nav")},
+                output={
+                    "target_weights": target_weights,
+                    "rationale": rationale[:500],
+                },
+            ):
+                pass
+
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to log PM decision to Langfuse: %s", exc)
 

@@ -134,3 +134,137 @@ def test_schema_rejects_negative_or_levered_weights() -> None:
 
     with pytest.raises(ValueError, match="exceed"):
         PMTargetWeights(date="2022-06-15", weights={"AAPL": 0.7}, cash_weight=0.4)
+
+
+# ---------------------------------------------------------------------------
+# Blocker #4 — PM sizing formula: floor(target_weight * NAV / price)
+# ---------------------------------------------------------------------------
+
+
+def test_rebalancer_buy_quantity_is_floor_target_weight_times_nav_over_price() -> None:
+    """Rebalancer must buy floor((w * NAV - current_value) / price) shares.
+
+    NAV=100_000, AAPL price=150, target=0.30 → target_value=30_000.
+    Current holdings = 0 → buy floor(30_000 / 150) = 200 shares.
+    """
+    nav = 100_000.0
+    price = 150.0
+    target_weight = 0.30
+    expected_qty = int(target_weight * nav / price)  # floor(30_000/150) = 200
+
+    result = rebalance_to_targets(
+        date="2023-01-03",
+        portfolio_snapshot=_snapshot(cash=nav, nav=nav),
+        current_prices={"AAPL": price},
+        target_weights=PMTargetWeights(
+            date="2023-01-03",
+            weights={"AAPL": target_weight},
+            rationale="sizing test",
+        ),
+    )
+
+    buys = [o for o in result.orders if o.side == "buy"]
+    assert buys, "Expected at least one buy order"
+    assert buys[0].quantity == expected_qty, (
+        f"Expected {expected_qty} shares, got {buys[0].quantity}"
+    )
+    assert buys[0].notional == pytest.approx(expected_qty * price)
+
+
+def test_rebalancer_cash_zero_positions_at_target_produces_holds_not_freeze() -> None:
+    """When cash=0 AND positions are already at target, rebalancer emits holds.
+
+    This is the 'portfolio freeze' regression: the rebalancer must NOT try to
+    buy with zero cash when positions are at target — it must produce hold orders.
+
+    Scenario: cash=0, AAPL=50% of NAV (target 50%), MSFT=50% (target 50%).
+    Diff is ~0 → no orders needed → holds.
+    """
+    nav = 30_000.0
+    result = rebalance_to_targets(
+        date="2023-01-03",
+        portfolio_snapshot=_snapshot(
+            cash=0.0,
+            positions=[
+                {"ticker": "AAPL", "quantity": 100, "market_value": 15_000.0},
+                {"ticker": "MSFT", "quantity": 50, "market_value": 15_000.0},
+            ],
+            nav=nav,
+        ),
+        current_prices={"AAPL": 150.0, "MSFT": 300.0},
+        target_weights=PMTargetWeights(
+            date="2023-01-03",
+            # Targets match current positions exactly → no trades needed
+            weights={"AAPL": 0.50, "MSFT": 0.50},
+            rationale="already at target — no trades",
+        ),
+    )
+    buys = [o for o in result.orders if o.side == "buy"]
+    sells = [o for o in result.orders if o.side == "sell"]
+    assert not buys, f"Expected no buys when at target with no cash, got {buys}"
+    assert not sells, f"Expected no sells when at target, got {sells}"
+    assert result.cash_after_estimate >= 0.0
+
+
+def test_rebalancer_sell_proceeds_fund_next_buy() -> None:
+    """Sell proceeds from one ticker make cash available for the next buy.
+
+    Scenario: AAPL over-weight → sell → cash increases → MSFT can be bought.
+    """
+    result = rebalance_to_targets(
+        date="2023-01-03",
+        portfolio_snapshot=_snapshot(
+            cash=0.0,
+            positions=[
+                {"ticker": "AAPL", "quantity": 500, "market_value": 75_000.0},
+            ],
+            nav=75_000.0,
+        ),
+        current_prices={"AAPL": 150.0, "MSFT": 300.0},
+        target_weights=PMTargetWeights(
+            date="2023-01-03",
+            weights={"AAPL": 0.40, "MSFT": 0.40},
+            cash_weight=0.20,
+            rationale="rebalance from concentrated AAPL",
+        ),
+    )
+
+    sides = {o.ticker: o.side for o in result.orders}
+    assert sides.get("AAPL") == "sell", "Expected AAPL to be trimmed"
+    assert sides.get("MSFT") == "buy", "Expected MSFT to be bought with AAPL proceeds"
+    assert result.cash_after_estimate >= 0.0
+
+
+def test_rebalancer_partial_fill_when_cash_insufficient() -> None:
+    """When cash covers only part of the target increase, partial fill is valid.
+
+    100k NAV, AAPL target 60% (= 60k), cash only 10k → can buy at most 66 shares.
+    """
+    nav = 100_000.0
+    price = 150.0
+    cash = 10_000.0
+    max_qty = int(cash / price)  # floor(10_000 / 150) = 66
+
+    result = rebalance_to_targets(
+        date="2023-01-03",
+        portfolio_snapshot=_snapshot(
+            cash=cash,
+            positions=[
+                {"ticker": "AAPL", "quantity": 200, "market_value": nav - cash},
+            ],
+            nav=nav,
+        ),
+        current_prices={"AAPL": price},
+        target_weights=PMTargetWeights(
+            date="2023-01-03",
+            weights={"AAPL": 0.60},
+            rationale="partial fill test",
+        ),
+    )
+
+    buys = [o for o in result.orders if o.side == "buy"]
+    if buys:
+        assert buys[0].quantity <= max_qty, (
+            f"Rebalancer bought {buys[0].quantity} > affordable {max_qty}"
+        )
+    assert result.cash_after_estimate >= 0.0

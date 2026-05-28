@@ -75,6 +75,7 @@ class PMBacktestEngine:
             OpenAIDiscussionBackbone,
             PMDiscussionResult,
         )
+        from mcp_quant_agent.agents.pm_memory import PMDecisionLog
         from mcp_quant_agent.agents.pm_schemas import (
             DailyPMDecision,
             PMTargetWeights,
@@ -104,6 +105,18 @@ class PMBacktestEngine:
                 model=model,
                 use_cache=self.use_llm_cache,
             )
+
+        # Decision memory log — causal cross-date context injection.
+        # Persisted to disk only when write_artifacts or API mode is active.
+        _persist_log = self.write_artifacts or not self.use_stub
+        _log_path = (
+            self.output_root / "runs" / self.run_id / "pm_decision_log.md"
+            if _persist_log
+            else None
+        )
+        decision_log = PMDecisionLog(log_path=_log_path)
+        _prev_prices: dict[str, float] = {}
+        _prev_decision_date: str | None = None
 
         all_date_strs = sorted(
             {
@@ -155,6 +168,26 @@ class PMBacktestEngine:
                 ticker: float(bars_by_ticker[ticker][-1]["close"])
                 for ticker in active_tickers
             }
+
+            # Update previous decision with one-period realized returns (causal:
+            # we now know the move from the previous close to the current close).
+            if _prev_decision_date is not None and _prev_prices:
+                realized_returns = {
+                    ticker: (current_prices[ticker] - _prev_prices[ticker])
+                    / _prev_prices[ticker]
+                    for ticker in active_tickers
+                    if ticker in _prev_prices and _prev_prices[ticker] > 0.0
+                }
+                decision_log.update_with_returns(
+                    date=_prev_decision_date,
+                    realized_returns=realized_returns,
+                )
+
+            past_context = decision_log.get_past_context(
+                t_now=date_str,
+                n_recent=5,
+            )
+
             portfolio_before = portfolio.get_portfolio_summary(current_prices)
             market_data: dict[str, dict[str, Any]] = {}
             tool_outputs: list[dict[str, Any]] = []
@@ -261,6 +294,7 @@ class PMBacktestEngine:
                         current_prices=current_prices,
                         regimes=regimes,
                         mcp_calls=mcp_calls,
+                        past_context=past_context,
                     )
                     if isinstance(outcome, PMDiscussionResult):
                         reports = outcome.reports
@@ -283,6 +317,17 @@ class PMBacktestEngine:
                         rationale=f"{error}; explicit all-cash fallback",
                     )
             latency_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
+
+            # Store decision in the memory log (pending until J+1 returns known).
+            decision_log.store_decision(
+                date=date_str,
+                weights=dict(targets.weights),
+                cash_weight=float(targets.cash_weight),
+                rationale=str(targets.rationale),
+                regimes={ticker: regimes.get(ticker) for ticker in active_tickers},
+            )
+            _prev_prices = dict(current_prices)
+            _prev_decision_date = date_str
 
             rebalance = rebalance_to_targets(
                 date=date_str,
@@ -356,6 +401,7 @@ class PMBacktestEngine:
                     mcp_calls=mcp_calls,
                     orders=[order.model_dump() for order in rebalance.orders],
                     fills=fills,
+                    past_context=past_context,
                     cache_hit=bool(getattr(pm_backbone, "last_cache_hit", False)),
                     cache_events=list(getattr(pm_backbone, "cache_events", [])),
                 )
@@ -621,8 +667,9 @@ class PMBacktestEngine:
         mcp_calls: list[dict[str, Any]],
         orders: list[dict[str, Any]],
         fills: list[dict[str, Any]],
-        cache_hit: bool,
-        cache_events: list[dict[str, Any]],
+        past_context: str = "",
+        cache_hit: bool = False,
+        cache_events: list[dict[str, Any]] | None = None,
     ) -> None:
         try:
             from mcp_quant_agent.observability.langfuse_setup import log_pm_decision
@@ -641,7 +688,8 @@ class PMBacktestEngine:
                 target_weights=decision.get("targets", {}),
                 orders=orders,
                 fills=fills,
-                metadata={"llm_cache_hit": cache_hit, "llm_cache_events": cache_events},
+                past_context=past_context,
+                metadata={"llm_cache_hit": cache_hit, "llm_cache_events": cache_events or []},
             )
         except Exception as exc:
             logger.debug("PM Langfuse logging skipped: %s", exc)

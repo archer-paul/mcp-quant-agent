@@ -13,13 +13,15 @@ letting the prompt grow unbounded or leaking future outcomes.
 PM decisions. It stores target weights, cash, rationale, regimes, and later
 per-ticker realized returns. `get_past_context(t_now=...)` only returns resolved
 entries whose decision date is strictly before `t_now`, and the context is capped
-to the most recent entries. `OpenAIDiscussionBackbone` accepts an optional
-`past_context` string, but the guarded one-date smoke does not enable memory.
+to the most recent entries. `PMBacktestEngine` wires this into the
+`OpenAIDiscussionBackbone` via an optional `past_context` string. In the guarded
+one-date smoke this remains empty by construction; in a future multi-date PM run
+it will inject only past resolved decisions.
 
 **Consequence:** We have a tested, causal memory utility ready for a future
 multi-date PM experiment without changing the current smoke envelope. It is not
-performance evidence and should not be used until the guard is deliberately
-expanded.
+performance evidence and should not be used for claims until the guard is
+deliberately expanded and the resulting `pm_decision_log.md` is audited.
 
 ---
 

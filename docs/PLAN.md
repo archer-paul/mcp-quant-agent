@@ -337,3 +337,75 @@ puis donne le PLAN.
 ---
 
 *Document de travail — à itérer. Prochaine étape suggérée : valider §7, puis lancer le prompt §5.3 dans Claude Code.*
+
+---
+
+## 8. Extensions futures (post-baseline, si temps disponible)
+
+Ces deux extensions ont été identifiées comme intéressantes pour la thèse mais ne
+sont **pas sur le chemin critique**.  Les implémenter seulement si le backtest PM
+multi-agent est validé, les métriques d'évaluation sont complètes, et il reste au
+moins 3-4 jours.
+
+### 8.1 Agent "Quant Researcher"
+
+**Idée** : ajouter un rôle d'agent qui peut lire la littérature financière (papers
+dans `papers/`) et les résultats des backtests courants, puis **créer et valider ses
+propres indicateurs techniques** (Ichimoku, custom ML features, etc.) et les mettre
+à disposition de l'analyste technique via le serveur MCP `analytics/`.
+
+**Architecture envisagée** :
+- Le Quant Researcher a accès en lecture aux papers (résumés, `papers/README.md`),
+  aux résultats de backtest (`results/*.csv`), et à un MCP `analytics/custom_tools`
+  où il peut enregistrer de nouvelles fonctions indicateur.
+- L'analyste technique peut découvrir et appeler ces indicateurs custom via MCP
+  (`list_custom_indicators`, `compute_custom_indicator`).
+- Le Quant Researcher tourne en mode "offline" (entre les runs, pas à chaque barre)
+  pour amortir le coût LLM.
+
+**Valeur pour la thèse** :
+- Angle original : un agent qui étend lui-même la toolbox MCP est une contribution
+  neuve par rapport à TradingAgents/HedgeAgents.
+- Potentiellement mesurable : comparer les performances avec/sans les indicateurs
+  custom du Quant Researcher.
+
+**Risques** :
+- Scope-creep majeur si mal délimité. Contraindre strictement : le Quant Researcher
+  ne peut écrire que dans un sandbox Python vérifié, pas dans le code de prod.
+- Sécurité : valider le code généré avant exécution (`ast.parse` + whitelist de
+  bibliothèques). Ne jamais exécuter du code LLM non validé.
+
+**Prérequis** : PM multi-agent validé + évaluation complète.
+
+---
+
+### 8.2 Fine-tuning par Reinforcement Learning (RL)
+
+**Idée** : utiliser les décisions et retours réalisés enregistrés dans
+`PMDecisionLog` (et `decisions.jsonl`) pour fine-tuner les agents via RL, par
+exemple avec RLHF ou un signal de récompense basé sur le PnL/Sharpe incrémental.
+
+**Pistes concrètes** :
+- **PPO/GRPO sur les LLM** : utiliser OpenAI fine-tuning API (RLHF) ou une
+  librairie open-source (TRL/veRL) pour entraîner un modèle à maximiser le
+  Sharpe incrémental.  Signal de récompense = retour ajusté du risque à J+5.
+- **Supervised fine-tuning (SFT) d'abord** : générer un dataset de paires
+  (contexte marché → décision optimale rétrospectivement) depuis `decisions.jsonl`
+  pour un premier SFT avant tout RL.
+- **Évaluation hors-distribution** : crucial de tester sur une période out-of-sample
+  (2024-2025) pour détecter le sur-apprentissage.
+
+**Valeur pour la thèse** :
+- Différenciateur fort si présenté proprement : "les agents s'améliorent par RL à
+  partir de leur propre historique MCP".
+- Aligné avec la tendance recherche (RLHF trading : cf. FinRL, AlphaPortfolio).
+
+**Risques** :
+- Complexité d'implémentation très élevée.  Ne pas commencer sans avoir 4+ jours
+  disponibles et une infrastructure GPU.
+- Overfitting sur le jeu de test existant si la frontière train/test n'est pas
+  strictement respectée.
+- Budget OpenAI fine-tuning potentiellement élevé.
+
+**Prérequis** : backtest PM complet avec au moins 200+ décisions réelles loggées,
+évaluation d'évaluation complète, période out-of-sample clairement définie.
