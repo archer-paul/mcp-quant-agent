@@ -128,7 +128,7 @@ Today's simulation date is given in the user message as T_NOW.  You can only
 act on data available at or before T_NOW.  Do not speculate about future events.
 
 Your task: analyse the provided market data for the given ticker and make ONE
-trading decision.  Work through this chain-of-thought:
+trading decision.  Think through all of these before writing your output:
 
 1. TREND: What is the price trend over the last 20 bars? Compare close to SMA20.
 2. MOMENTUM: What do RSI-14 and MACD suggest about momentum direction?
@@ -148,25 +148,42 @@ trading decision.  Work through this chain-of-thought:
      or a partial fraction). Never sell more shares than you currently hold.
    - If NAV < 500 (portfolio severely depleted): hold everything, do not trade.
    - quantity=0 is ONLY valid for action="hold".
-7. DECISION: State action, exact integer quantity, and 2-3 sentence rationale.
 
-Output ONLY a JSON object -- no prose, no markdown code fences, no extra keys:
-{"action": "buy"|"sell"|"hold", "quantity": <non-negative integer>, "rationale": "<2-3 sentences>"}
+Output ONLY a JSON object with EXACTLY these three keys — no "chain_of_thought"
+key, no extra keys, no markdown fences, no prose outside the JSON:
+{"action": "buy"|"sell"|"hold", "quantity": <non-negative integer>, "rationale": "<your reasoning: 3-5 sentences covering trend, momentum, regime, sizing>"}
 
 Rules:
 - "hold" -> quantity MUST be 0.
 - "buy" / "sell" -> quantity MUST be > 0.
 - Single position MUST NOT exceed 20% of portfolio NAV.
 - Insufficient data (<20 bars) -> {"action": "hold", "quantity": 0, "rationale": "insufficient data"}.
+- IMPORTANT: Do NOT add a "chain_of_thought" key.  Write all reasoning inside "rationale".
 """
 
 
 def _parse_decision(raw: str) -> dict[str, Any]:
-    """Parse the LLM response into a decision dict, with fallback."""
+    """Parse the LLM response into a decision dict, with two-stage fallback.
+
+    Stage 1 — ``json.loads``: fast path for well-formed responses.
+    Stage 2 — regex extraction: handles responses where the JSON is malformed
+      (most commonly because the model wrapped its chain-of-thought in a nested
+      JSON object that hit the token-length ceiling mid-generation, making the
+      outer JSON incomplete/invalid).  We only need ``action``, ``quantity``,
+      and ``rationale`` from the TOP-LEVEL keys.  Those fields are almost always
+      generated AFTER the chain_of_thought, so they may be absent when the
+      response is severely truncated; in that case the hold-fallback applies.
+
+    Raises
+    ------
+    Nothing — always returns a valid decision dict.
+    """
     raw = raw.strip()
     # Strip markdown code fences if present
     raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.MULTILINE)
     raw = re.sub(r"\n?```$", "", raw, flags=re.MULTILINE)
+
+    # ── Stage 1: standard JSON parse ─────────────────────────────────────────
     try:
         d: dict[str, Any] = json.loads(raw)
         action = str(d.get("action", "hold")).lower()
@@ -180,9 +197,41 @@ def _parse_decision(raw: str) -> dict[str, Any]:
             "quantity": quantity,
             "rationale": str(d.get("rationale", "")),
         }
-    except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        logger.warning("Failed to parse LLM decision: %s | raw=%r", exc, raw[:200])
-        return {"action": "hold", "quantity": 0, "rationale": f"parse_error: {exc}"}
+    except (json.JSONDecodeError, ValueError, TypeError) as json_exc:
+        pass  # fall through to Stage 2
+
+    # ── Stage 2: regex extraction from malformed / truncated JSON ────────────
+    # The response format is always:
+    #   {"chain_of_thought": {...}, "action": "...", "quantity": N, "rationale": "..."}
+    # We extract top-level scalar fields only (chain_of_thought is ignored).
+    action_m = re.search(r'"action"\s*:\s*"(buy|sell|hold)"', raw, re.IGNORECASE)
+    qty_m = re.search(r'"quantity"\s*:\s*(\d+)', raw)
+    # Rationale: double-quoted string, handles \" escapes inside, non-greedy.
+    rat_m = re.search(r'"rationale"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, re.DOTALL)
+
+    if action_m:
+        action = action_m.group(1).lower()
+        quantity = int(qty_m.group(1)) if qty_m else 0
+        rationale = rat_m.group(1) if rat_m else ""
+        # Unescape JSON string escapes so the rationale reads naturally.
+        try:
+            rationale = json.loads(f'"{rationale}"')
+        except Exception:
+            pass  # keep raw form if re-escape fails
+        if action == "hold":
+            quantity = 0
+        logger.warning(
+            "Used regex fallback for malformed JSON "
+            "(action=%s qty=%d rationale_len=%d) raw_len=%d",
+            action, quantity, len(rationale), len(raw),
+        )
+        return {"action": action, "quantity": max(0, quantity), "rationale": rationale}
+
+    # ── Stage 3: complete failure ─────────────────────────────────────────────
+    logger.warning(
+        "Failed to parse LLM decision (both JSON and regex): raw=%r", raw[:200]
+    )
+    return {"action": "hold", "quantity": 0, "rationale": f"parse_error: malformed JSON"}
 
 
 class StubBackbone:
@@ -297,7 +346,7 @@ async def _call_openai_async(
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=2048,
+                max_tokens=4096,
                 response_format={"type": "json_object"},
             )
             return str(response.choices[0].message.content or "")

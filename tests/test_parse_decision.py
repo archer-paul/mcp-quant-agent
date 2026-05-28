@@ -114,9 +114,22 @@ def test_prose_then_json() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_malformed_json_fallback() -> None:
-    """Broken JSON must produce a hold fallback, never raise."""
+def test_malformed_json_regex_rescue() -> None:
+    """Stage-2 regex fallback rescues malformed JSON that still contains the
+    required top-level keys (action / quantity / rationale)."""
     raw = '{"action": "buy", "quantity": 10 "rationale": "missing comma"}'
+    d = _parse_decision(raw)
+    _assert_valid_structure(d)
+    # Regex fallback should extract action=buy and quantity=10 from the raw text.
+    assert d["action"] == "buy"
+    assert d["quantity"] == 10
+
+
+def test_malformed_json_truncated_fallback() -> None:
+    """Truncated JSON (action / quantity / rationale absent) must fall back to
+    hold with a parse_error rationale, never raise."""
+    # Simulate a chain_of_thought response truncated before action/quantity keys.
+    raw = '{"chain_of_thought": {"trend": "prices rising from 130 to 148"'
     d = _parse_decision(raw)
     _assert_valid_structure(d)
     assert d["action"] == "hold"
