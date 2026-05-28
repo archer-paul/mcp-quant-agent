@@ -1193,17 +1193,22 @@ def compute_pm_faithfulness(
             str(t).upper(): float(w)
             for t, w in (targets.get("weights") or {}).items()
         }
+        # Full ticker universe from the decision, not just tickers with non-zero weight.
+        # This is critical: if the PM is all-cash, weights={} but we still need to
+        # score the hold decision for each ticker vs. the analyst signals.
+        universe: set[str] = {str(t).upper() for t in (dec.get("tickers") or [])}
+        if not universe:
+            universe = set(weights) | set(prev_weights)
         gross = sum(weights.values())
         reports = dec.get("reports") or []
         portfolio_before = dec.get("portfolio_before") or {}
 
         if not prev_weights:
-            # First decision — no comparison possible; set baseline
-            prev_weights = dict.fromkeys(weights, 0.0)
-            prev_weights.update(weights)
+            # First decision — no comparison possible; set baseline from universe.
+            prev_weights = {ticker: weights.get(ticker, 0.0) for ticker in universe}
             continue
 
-        for ticker in set(weights) | set(prev_weights):
+        for ticker in universe | set(prev_weights):
             target_weight = weights.get(ticker, 0.0)
             previous_weight = prev_weights.get(ticker, 0.0)
             direction = _pm_weight_direction(target_weight, previous_weight, tolerance)
@@ -1253,7 +1258,7 @@ def compute_pm_faithfulness(
                         }
                     )
 
-        prev_weights = {ticker: weights.get(ticker, 0.0) for ticker in set(weights) | set(prev_weights)}
+        prev_weights = {ticker: weights.get(ticker, 0.0) for ticker in universe | set(prev_weights)}
 
     n_scoreable = n_faithful + n_unfaithful + n_constrained
     pm_faith = n_faithful / n_scoreable if n_scoreable > 0 else 0.0

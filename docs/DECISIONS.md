@@ -2,6 +2,127 @@
 
 ---
 
+### 2026-05-29 - Real-LLM bounded eval: single-agent + PM, bear+bull windows, multi-seed
+
+**Context:** After locking the methodological core (eval pipeline), the next step
+was to validate the full pipeline on REAL LLM outputs, not stub results.  All
+tables below are from genuine gpt-4.1-mini calls (cached LLM responses, $0 reruns).
+
+**Windows:**
+- Window A (bear): AAPL+MSFT+NVDA, 2023-01-03→2023-01-06, 4 trading dates
+- Window B (bull): AAPL+MSFT+NVDA, 2023-05-15→2023-05-18, 4 trading dates
+
+**New infrastructure:**
+- `PMMultiDayGuardResult` in `pm_smoke_guard.py` — bounded multi-date PM guard
+  (max 10 dates, max 3 tickers, dev model, cache on, acknowledge-cost).  Relaxes
+  the 1-date `PMSmokeGuardResult` constraint without weakening it.
+- `PMBacktestEngine._validate_api_smoke_authorized` accepts both guard types.
+- `scripts/run_bounded_eval.py` — bounded single-agent real run + grounding/faithfulness.
+- `scripts/run_pm_multiday.py` — bounded PM multi-day run + PM faithfulness.
+- `scripts/run_multiseed_bootstrap.py` — multi-seed bootstrap demonstration.
+- `scripts/eval_run.py` — standalone eval on any decisions.jsonl.
+- `compute_pm_faithfulness` bug fix: uses `decision["tickers"]` as the universe
+  (not just tickers with non-zero weight), so all-cash PM decisions are scored.
+
+**Real-LLM eval tables (smoke-scale, NOT thesis-final):**
+
+| Window | Agent | Regime | n | Grounding | Faithfulness v2 | Faith strict |
+|--------|-------|--------|---|-----------|-----------------|--------------|
+| A bear | single-agent | bear | 12 | **1.0000** | **0.8333** | 0.8333 |
+| B bull | single-agent | bull | 12 | **1.0000** | **0.3333** | 0.3333 |
+| A bear | PM multi-agent | bear | 4 | 0.0000 (no claims) | 0.000 constrained | n/a |
+| B bull | PM multi-agent | bull | 4 | 0.0000 (no claims) | **0.6667** | **0.8571** |
+
+Grounding = 1.0000 on both single-agent windows (39+49 numeric claims verified).
+PM grounding = 0.0 because the PM rationale is concise (no numeric claims at this scale).
+PM faithfulness in bear = 0 with 9/9 constrained: all-cash PM decision in bear+empty-news
+is the right behavior; "can't short below zero" exemption applies to all 3 tickers.
+PM faithfulness in bull = 0.6667 (overall), 0.8571 (strict): 1 unfaithful case (NVDA
+consensus=+0.70 bullish but PM held at 10% — consistent with PM's conservative allocation
+after already holding the position).
+
+**Multi-seed bootstrap (window A, 3 seeds, cache ON):**
+All 3 seeds produce identical Sharpe = 5.521 and Sharpe CI = [0.000, 0.000] (expected:
+cache is deterministic, 4 NAV points is too few for meaningful bootstrap).
+Interpretation: bootstrap CI requires ≥ 30 NAV points.  The full canonical Run #4
+(2505 decisions) produces Sharpe 2.35 [0.92, 3.58] which IS the thesis CI.
+Multi-seed variation requires `--no-cache`; across-seed Sharpe std = 0.000 confirms
+cache determinism.
+
+**Langfuse:** Traces were emitted during all real LLM runs (keys configured, `flush()`
+called at end of each run).  Single-agent traces are auto-traced by `langfuse.openai`
+drop-in.  PM traces use nested spans (pm-decision parent → analyst/discussion/PM children).
+View at cloud.langfuse.com with the project's LANGFUSE_PUBLIC_KEY.
+
+**Unfaithful patterns (real LLM):**
+- Bear window A: NVDA 2023-01-03 (agent=buy, judge=hold); AAPL 2023-01-04 (agent=buy, judge=hold)
+  → D1 aggressive buying in bear regime despite lack of bullish signals
+- Bull window B: 8/12 unfaithful — mostly agent=buy vs judge=hold (already at target),
+  and agent=hold vs judge=sell (NVDA non-trim); same non-trim pattern as canonical Run #4
+
+**Consequence:** Real-LLM grounding is perfect (1.000) on both windows, validating the
+grounding implementation.  Faithfulness shows the same qualitative pattern as the
+canonical run: agent is more faithful in bear than bull, non-trim sell gap persists.
+
+---
+
+### 2026-05-28 - Methodological core locked: 4 blockers resolved, eval pipeline complete
+
+**Context:** Before expanding the PM architecture further, the methodological core had
+to be audited and fixed: (a) regime labels deterministic and well-documented, (b) None
+regime from warm-up bars handled without spurious "unknown" in eval tables, (c)
+faithfulness metric adapted to PM multi-agent architecture, (d) PM sizing formula
+tested against NAV-fraction formula.
+
+**Blocker #1 — None-regime / warm-up treatment:**
+Added `_extract_decision_regime(decision)` to `reasoning.py`. Handles both schemas:
+single-agent (`decision["regime"]`) and PM (`decision["regimes"]` dict, worst-case
+aggregated by priority: high_vol > bear > range > bull). Updated `_segment_by_regime`
+to use this helper and collect None-regime decisions under `"__warmup__"`, excluded
+from eval tables but counted in `n_warmup_excluded` in `compute_all_reasoning_metrics`.
+No more spurious "unknown" row in regime-segmented tables. PM decisions correctly
+inherit the worst-case regime label.
+
+**Blocker #2 — Regime determinism:** Already covered by `TestRegimeDeterminism` (6
+tests). Root cause of Run #1/2 instability confirmed: corrupt OHLCV prices from the
+yfinance MultiIndex bug, not non-determinism in the detector. Run #4 labels are
+canonical.
+
+**Blocker #3 — PM faithfulness (`compute_pm_faithfulness`):**
+New function in `reasoning.py`. Operates on PM JSONL decisions. For each (date, ticker)
+pair after the first decision (baseline), measures whether the PM's target-weight
+direction (increase/hold/decrease) is consistent with the weighted analyst consensus
+(technical 55% + news 25% + risk 20%). Three constrained cases (same spirit as
+single-agent v2): (A) cash < 5% of NAV → can't rebalance; (B) previous weight >= 40%
+→ already concentrated; (C) previous weight = 0 and bearish consensus → can't short.
+Also adds `pm_faithfulness_strict` (excludes constrained from denominator, consistent
+with single-agent `faithfulness_strict`).
+
+**Blocker #4 — PM sizing non-regression tests:** Added 4 tests to `test_pm_rebalancer.py`:
+floor(w×NAV/price) formula verification; cash=0 at-target → holds not freeze; sell
+proceeds fund next buy; partial fill when cash insufficient. All 4 pass.
+
+**Langfuse nested spans:** `log_pm_decision` now emits a PM parent observation
+containing child spans for each analyst role (technical, news, risk), each discussion
+stage (investment_debate, research_manager, trader, risk_debate), and the final
+portfolio-manager allocation. `past_context_preview` is visible in the parent input.
+The `past_context` parameter is now threaded from `PMBacktestEngine` → `_log_pm_langfuse`.
+
+**Bounded smoke eval (stub, $0):** `scripts/eval_pm_stub.py` on
+`pm_stub_20260528_232402` (AAPL+MSFT, 2023-01-03→2023-01-09, 5 dates):
+- Regime: all "bear" (correct for Jan 2023 AAPL/MSFT)
+- n_warmup_excluded: 0 (enough bars from cache)
+- PM faithfulness: 0.250 (1 faithful / 4 scoreable); strict: 1.000 (0 unfaithful)
+- PM constrained: 3 (MSFT weight=0 with bearish consensus — can't short, expected)
+- Grounding: 0.000 (stub rationale has no numeric claims — correct, not a failure)
+- Memory log: 4 resolved + 1 pending, causal chain verified (realized returns fill in at J+1)
+
+**Consequence:** The eval pipeline is now structurally sound for both single-agent and
+PM multi-agent paths. No spurious "unknown" regime. PM faithfulness correctly identifies
+constrained vs. genuine unfaithful cases. Ready for a real bounded PM API run.
+
+---
+
 ### 2026-05-28 - PM memory: bounded causal context utility, not enabled in smoke
 
 **Context:** TradingAgents keeps a decision memory log so later agents can reuse

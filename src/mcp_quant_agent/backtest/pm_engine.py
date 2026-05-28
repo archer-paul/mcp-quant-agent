@@ -449,27 +449,34 @@ class PMBacktestEngine:
         """Require the exact smoke guard result before PM API mode can run."""
         if self.smoke_guard is None:
             raise RuntimeError(
-                "PM API mode requires a validated PMSmokeGuardResult. "
-                "Use scripts/run_pm_api_smoke.py so the smoke guard enforces "
-                "one date, <=2 tickers, dev model, cache on, and cost acknowledgement."
+                "PM API mode requires a validated PMSmokeGuardResult or "
+                "PMMultiDayGuardResult.  Use scripts/run_pm_api_smoke.py (1 date) "
+                "or scripts/run_pm_multiday.py (multi-date bounded)."
             )
+
+        from mcp_quant_agent.backtest.pm_smoke_guard import PMMultiDayGuardResult
 
         guard = self.smoke_guard
         guard_tickers = list(getattr(guard, "tickers", []))
         if sorted(guard_tickers) != sorted(self.tickers):
             raise RuntimeError(
-                f"PM API smoke guard tickers {guard_tickers} do not match engine tickers {self.tickers}."
+                f"PM guard tickers {guard_tickers} do not match engine tickers {self.tickers}."
             )
         if getattr(guard, "start_date", None) != self.start_date or getattr(guard, "end_date", None) != self.end_date:
-            raise RuntimeError("PM API smoke guard dates do not match engine dates.")
-        if self.start_date != self.end_date:
-            raise RuntimeError("PM API smoke engine path must process exactly one date.")
+            raise RuntimeError("PM guard dates do not match engine dates.")
+        # 1-date guard: enforce single date.  Multi-day guard: allow range.
+        is_multiday = isinstance(guard, PMMultiDayGuardResult)
+        if not is_multiday and self.start_date != self.end_date:
+            raise RuntimeError(
+                "PMSmokeGuardResult (1-date guard) requires start_date==end_date. "
+                "Use PMMultiDayGuardResult for multi-date runs."
+            )
         if getattr(guard, "model", None) != model:
-            raise RuntimeError("PM API smoke guard model does not match engine model.")
+            raise RuntimeError("PM guard model does not match engine model.")
         if not bool(getattr(guard, "use_llm_cache", False)) or not self.use_llm_cache:
-            raise RuntimeError("PM API smoke requires LLM cache enabled.")
-        if int(getattr(guard, "estimated_pm_calls", 0)) != 1:
-            raise RuntimeError("PM API smoke guard must estimate exactly one PM call.")
+            raise RuntimeError("PM run requires LLM cache enabled.")
+        if not is_multiday and int(getattr(guard, "estimated_pm_calls", 0)) != 1:
+            raise RuntimeError("PMSmokeGuardResult must estimate exactly one PM call.")
 
     def _load_price_data(self) -> dict[str, list[dict[str, Any]]]:
         if self.price_data is not None:
