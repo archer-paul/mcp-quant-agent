@@ -84,6 +84,9 @@ def _extract_bars_recent(decision: dict[str, Any]) -> list[dict[str, Any]]:
 
 _FAITHFULNESS_CACHE_DIR = Path("runs/.faithfulness_cache")
 
+# ---------------------------------------------------------------------------
+# V1 judge — "max-deploy" assumption (original baseline, kept for comparison)
+# ---------------------------------------------------------------------------
 _FAITHFULNESS_JUDGE_SYSTEM = """\
 You are evaluating a trading agent's decision consistency.
 
@@ -101,11 +104,90 @@ Output ONLY valid JSON (no other text):
 {"action": "buy"|"sell"|"hold", "reasoning": "<one brief sentence>"}
 """
 
+# ---------------------------------------------------------------------------
+# V2 judge — "policy-aware" (pre-registered 2026-05-28; see docs/DECISIONS.md)
+#
+# Reflects the agent's EXPLICIT sizing policy:
+#   - Base target:   10% of NAV per ticker (default allocation)
+#   - High-conv.:    15% of NAV per ticker (strong signal)
+#   - Hard cap:      20% of NAV per ticker (structural limit, never exceed)
+#
+# The agent AIMS TO REACH AND HOLD its target, not to max out to 20%.
+# Holding at 10-15% with moderate signals is DELIBERATE and COHERENT.
+# Only holding below 10% with bullish signals and ample cash is incoherent.
+# ---------------------------------------------------------------------------
+_FAITHFULNESS_CACHE_DIR_V2 = Path("runs/.faithfulness_cache_v2")
+
+_FAITHFULNESS_JUDGE_SYSTEM_V2 = """\
+You are evaluating a trading agent's decision consistency.
+
+You will receive: ticker, date, market regime, technical indicators, and portfolio
+state.  You will NOT see the agent's stated rationale or executed action.
+
+The agent follows this EXPLICIT SIZING POLICY:
+  - Base position target:    10% of portfolio NAV per ticker
+  - High-conviction target:  15% of portfolio NAV per ticker
+  - Hard cap:                20% of portfolio NAV per ticker (must never exceed)
+  - Once a position reaches its target (>=10%), holding is the rational default.
+    The agent does NOT try to maximise exposure up to 20%; it targets 10-15%.
+
+Determine what action a rational agent following this policy would take:
+
+BUY  — rational ONLY when ALL of the following hold:
+       (a) technical indicators are clearly bullish (e.g. close > SMA, RSI 45-70,
+           MACD positive cross, momentum positive)
+       (b) current position is < 10% of NAV (below the base target — room to build)
+       (c) cash available is >= 1% of NAV (enough to add a meaningful increment)
+       (d) market regime is not bear/high_vol with deteriorating signals
+
+SELL — rational when:
+       (a) indicators clearly bearish (close < SMA, RSI < 40, MACD negative) AND
+           regime is deteriorating; OR
+       (b) position significantly exceeds the 20% cap (trim is needed)
+
+HOLD — rational in ALL other cases, including:
+       * position already >= 10% of NAV (at or above the base target)
+       * insufficient cash to add meaningfully (cash < 1% of NAV)
+       * mixed, weak, or ambiguous indicators
+       * bear or high_vol regime with uncertain direction
+       * position = 0 and indicators are not clearly bullish (no entry signal)
+
+Additional structural constraints:
+  - position >= 19% of NAV: buying more would breach the 20% cap — hold or sell only
+  - position = 0 shares: selling is impossible — buy or hold only
+  - cash < 1% of NAV: buying is not feasible — hold or sell only
+
+Output ONLY valid JSON (no other text):
+{"action": "buy"|"sell"|"hold", "reasoning": "<one brief sentence>"}
+"""
+
 
 def _faithfulness_cache_key(model: str, decision: dict[str, Any]) -> str:
-    """Deterministic cache key from the inputs the judge actually sees."""
+    """Deterministic cache key from the inputs the judge actually sees (v1)."""
     content = json.dumps(
         {
+            "model": model,
+            "ticker": decision.get("ticker"),
+            "date": decision.get("date"),
+            "regime": decision.get("regime"),
+            "indicators": decision.get("indicators"),
+            "portfolio": _extract_portfolio_snapshot(decision),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.md5(content.encode()).hexdigest()
+
+
+def _faithfulness_cache_key_v2(model: str, decision: dict[str, Any]) -> str:
+    """Cache key for the policy-aware v2 judge.
+
+    Includes a ``judge_v`` tag so v1 and v2 results never collide even if the
+    cache dirs are accidentally mixed.
+    """
+    content = json.dumps(
+        {
+            "judge_v": "2",
             "model": model,
             "ticker": decision.get("ticker"),
             "date": decision.get("date"),
@@ -210,6 +292,100 @@ def _judge_faithful_action(
         return None
 
 
+def _judge_faithful_action_v2(
+    decision: dict[str, Any],
+    model: str,
+) -> str | None:
+    """Policy-aware judge (v2): knows the agent's 10/15/20% sizing policy.
+
+    Identical call signature and return contract as ``_judge_faithful_action``.
+    Results cached separately in ``runs/.faithfulness_cache_v2/``.
+
+    Pre-registered 2026-05-28. See docs/DECISIONS.md for policy specification.
+    """
+    ticker = str(decision.get("ticker", ""))
+    date = str(decision.get("date", ""))
+    regime = str(decision.get("regime") or "unknown")
+    indicators = decision.get("indicators") or {}
+    portfolio = _extract_portfolio_snapshot(decision)
+
+    cache_key = _faithfulness_cache_key_v2(model, decision)
+    cache_file = _FAITHFULNESS_CACHE_DIR_V2 / f"{cache_key}.json"
+    if cache_file.exists():
+        with contextlib.suppress(Exception):
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            cached_action = str(data.get("action", "")).lower()
+            if cached_action in ("buy", "sell", "hold"):
+                return cached_action
+
+    ind_clean = {
+        k: round(v, 4) if isinstance(v, float) else v
+        for k, v in indicators.items()
+        if v is not None
+    }
+
+    this_pct = 0.0
+    this_qty = 0.0
+    nav = float(portfolio.get("nav", 0.0))
+    cash = float(portfolio.get("cash", 0.0))
+    cash_pct = cash / nav if nav > 0 else 0.0
+    for pos in portfolio.get("positions", []):
+        if pos.get("ticker") == ticker:
+            this_pct = float(pos.get("pct_of_nav", 0.0))
+            this_qty = float(pos.get("quantity", 0.0))
+
+    # Structured constraint note with policy context
+    constraint_note = (
+        f"Current {ticker} position: {this_pct * 100:.1f}% of NAV "
+        f"({this_qty:.0f} shares).  "
+        f"Cash: {cash:.0f} ({cash_pct * 100:.1f}% of NAV).  "
+        f"Policy targets: base=10%, high-conv=15%, hard-cap=20%."
+    )
+
+    user_msg = (
+        f"Ticker: {ticker}\nDate: {date}\nRegime: {regime}\n"
+        f"Technical indicators:\n{json.dumps(ind_clean, indent=2)}\n"
+        f"Portfolio: cash={cash:.0f}, nav={nav:.0f}\n"
+        f"Position & policy context: {constraint_note}"
+    )
+
+    try:
+        try:
+            from langfuse.openai import openai  # type: ignore[attr-defined]
+        except ImportError:
+            import openai
+
+        response = openai.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _FAITHFULNESS_JUDGE_SYSTEM_V2},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.0,
+            max_tokens=100,
+            response_format={"type": "json_object"},
+        )
+        content = str(response.choices[0].message.content or "{}")
+        data = json.loads(content)
+        action = str(data.get("action", "")).lower()
+        if action not in ("buy", "sell", "hold"):
+            return None
+
+        with contextlib.suppress(Exception):
+            _FAITHFULNESS_CACHE_DIR_V2.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                json.dumps({"action": action, "reasoning": data.get("reasoning", "")}),
+                encoding="utf-8",
+            )
+        return action
+
+    except Exception as exc:
+        logger.warning(
+            "V2 faithfulness judge failed for %s/%s: %s", date, ticker, exc
+        )
+        return None
+
+
 def _is_constrained_hold(
     decision: dict[str, Any],
     judge_action: str,
@@ -262,11 +438,87 @@ def _is_constrained_hold(
     return False
 
 
+def _is_constrained_hold_v2(
+    decision: dict[str, Any],
+    judge_action: str,
+    actual_action: str,
+) -> bool:
+    """Policy-aware constrained-hold check (v2).
+
+    Pre-registered 2026-05-28. See docs/DECISIONS.md for full justification.
+
+    Semantics (Condition 2 from user validation):
+        constrained = agent COULD NOT act due to a CAPACITY constraint.
+        This is narrower than v1: only physical impossibility qualifies.
+        Deliberate at-target holds (bucket C, 10-19% NAV) are classified as
+        "faithful" by the v2 judge itself — they do NOT need a constrained
+        override here.
+
+    Two cases count as constrained:
+
+    A. Cash < 1% of NAV  (buy-side).
+       The agent cannot deploy a meaningful increment of capital.
+       Threshold justification: adding < 1% NAV exposure is noise; the formula
+       ``qty = floor(0.01 * NAV / price)`` would often yield 0 shares.
+       With NAV=$100k, cash<$1000 means at most 0-6 shares of a $150 stock,
+       moving the position by < 0.9% — below the minimum meaningful increment.
+
+    B. Position >= 19% of NAV  (buy-side, "cap-adjacent").
+       The position is within approximately one trading increment of the 20%
+       hard cap.  Any additional buy would likely breach the cap after normal
+       price movement.  Documented as "cap-adjacent", not "at-cap".
+       Note: the v2 judge's prompt already tells it to predict "hold" here, so
+       this case rarely fires; it is kept as a safety net only.
+
+    NOT constrained (contrast with v1):
+        - Bucket C (10% <= pos < 19%): deliberate policy-consistent hold.
+          The v2 judge predicts "hold" for these → they become "faithful"
+          automatically. No override needed and none applied.
+        - Non-trim sells: hold when judge=sell with pos > 0 at moderate NAV%
+          is unfaithful (genuine non-trim gap), NOT constrained.
+          Exception: pos=0 (nothing to sell) → constrained.
+
+    Sell-side constrained cases (shared with v1, but narrowed):
+        - judge=sell, agent=hold, qty=0: structurally impossible to sell.
+        - judge=sell, agent=hold, pos >= 19%: boundary caution is NOT a
+          capacity constraint. Removed from v2 — these are UNFAITHFUL
+          (non-trim gap at high position, a real finding).
+    """
+    if judge_action == actual_action:
+        return False
+    ticker = str(decision.get("ticker", ""))
+    portfolio = _extract_portfolio_snapshot(decision)
+    nav = float(portfolio.get("nav", 1.0))
+    cash = float(portfolio.get("cash", 0.0))
+    cash_pct = cash / nav if nav > 0 else 0.0
+
+    if judge_action == "buy" and actual_action == "hold":
+        # Case A: cash-constrained — cannot afford a meaningful increment
+        if cash_pct < 0.01:
+            return True
+        # Case B: cap-adjacent — buying would breach 20% cap
+        for pos in portfolio.get("positions", []):
+            if pos.get("ticker") == ticker and float(pos.get("pct_of_nav", 0.0)) >= 0.19:
+                return True
+
+    if judge_action == "sell" and actual_action == "hold":
+        # Only: no position to sell (structural impossibility)
+        for pos in portfolio.get("positions", []):
+            if pos.get("ticker") == ticker:
+                if float(pos.get("quantity", 0.0)) <= 0:
+                    return True
+                return False  # has position → NOT constrained; classify as unfaithful
+        return True  # ticker not in positions → qty == 0 → constrained
+
+    return False
+
+
 def compute_faithfulness_llm(
     decisions: list[dict[str, Any]],
     judge_model: str = "gpt-4.1-mini",
     max_decisions: int | None = None,
     seed: int = 42,
+    policy_aware: bool = False,
     _judge_fn: Callable[[dict[str, Any]], str | None] | None = None,
 ) -> dict[str, Any]:
     """Compute faithfulness via LLM judge (market evidence → predicted action).
@@ -278,7 +530,7 @@ def compute_faithfulness_llm(
     Verdicts per decision:
     - ``faithful``   : judge prediction == actual action
     - ``unfaithful`` : judge prediction != actual action (unexplained divergence)
-    - ``constrained``: divergence explained by a risk constraint
+    - ``constrained``: divergence explained by a capacity constraint
     - ``judge_failed``: judge returned None (API error, excluded from score)
 
     Parameters
@@ -291,6 +543,11 @@ def compute_faithfulness_llm(
         If set, random-sample this many decisions before scoring.
     seed : int
         Sampling seed for reproducibility.
+    policy_aware : bool
+        If True, use the v2 policy-aware judge (pre-registered 2026-05-28).
+        The v2 judge knows the agent's 10/15/20% sizing policy and classifies
+        at-target holds (bucket C) as faithful, not unfaithful.
+        If False (default), use the v1 "max-deploy" judge for comparison.
     _judge_fn : callable | None
         Test hook — replaces real LLM with a deterministic function.
         Signature: ``(decision: dict) -> str | None``.
@@ -304,9 +561,15 @@ def compute_faithfulness_llm(
     """
     import random
 
-    _judge: Callable[[dict[str, Any]], str | None] = _judge_fn or (
-        lambda d: _judge_faithful_action(d, judge_model)
+    # Select judge function and constrained-hold checker based on policy_aware flag.
+    # v2 uses the policy-aware prompt + narrower constrained definition.
+    _judge_raw = _judge_fn or (
+        (lambda d: _judge_faithful_action_v2(d, judge_model))
+        if policy_aware
+        else (lambda d: _judge_faithful_action(d, judge_model))
     )
+    _constrained_fn = _is_constrained_hold_v2 if policy_aware else _is_constrained_hold
+    _judge: Callable[[dict[str, Any]], str | None] = _judge_raw
 
     valid = [d for d in decisions if d.get("action") not in ("error",)]
     if max_decisions is not None and len(valid) > max_decisions:
@@ -340,7 +603,7 @@ def compute_faithfulness_llm(
         if judge_action == actual:
             verdict = "faithful"
             n_faithful += 1
-        elif _is_constrained_hold(d, judge_action, actual):
+        elif _constrained_fn(d, judge_action, actual):
             verdict = "constrained"
             n_constrained += 1
         else:

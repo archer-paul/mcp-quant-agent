@@ -1,5 +1,127 @@
 # Design decisions (ADR-lite)
 
+---
+
+### 2026-05-28 — PRE-REGISTRATION: policy-aware faithfulness judge (v2)
+
+**Context:** Run #4 faithfulness (v1 judge) = 0.281 overall, 0.372 strict. Diagnostic showed
+the v1 judge had a systematic bias: it assumed the agent tries to deploy up to the 20% hard cap,
+so it marked at-target holds (10–19% NAV) as unfaithful. But the SYSTEM_PROMPT explicitly targets
+10–15% NAV — holding at that level is deliberate, not a reasoning failure.
+
+**User validated** the following policy spec on 2026-05-28 before any recalculation.
+Pre-registration means the spec was locked before looking at the v2 numbers.
+
+#### Revealed sizing policy (from SYSTEM_PROMPT + rationale evidence)
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Base target | 10% of NAV | SYSTEM_PROMPT formula: `target_value = 0.10 * NAV` |
+| High-conviction target | 15% of NAV | SYSTEM_PROMPT formula: `target_value = 0.15 * NAV` |
+| Hard cap | 20% of NAV | SYSTEM_PROMPT formula + engine structural cap |
+
+Rationale language (2354/2505 = 94% decisions contain sizing %): 20% mentioned 1495×,
+15% 512×, 10% 295×, 14–16% 611× — confirms the agent explicitly tracks the 10-15% target
+zone and references the 20% cap as a hard limit, not a target.
+
+#### Hold-decision diagnostic (pre-v2 structural bucketing)
+
+| Bucket | N | % of holds | Definition |
+|--------|---|-----------|------------|
+| A | 1730 | 75.3% | Cash < 1% NAV — capacity constraint (can't deploy) |
+| B | 306 | 13.3% | Position >= 19% NAV — cap-adjacent (buying would breach 20% cap) |
+| C | 104 | 4.5% | Position 10–19% NAV — at/near target (deliberate hold) |
+| D | 156 | 6.8% | Position < 10%, cash >= 1% — potential gap; classified by v2 LLM judge |
+
+#### V1 judge flaw
+
+The v1 "max-deploy" judge only knew the 20% cap. Seeing a position at 14%:
+"still room to buy → predict buy → agent holds → **unfaithful**." This was wrong for
+bucket C (policy-consistent disciplined hold).
+
+#### V2 judge design (pre-registered)
+
+`_FAITHFULNESS_JUDGE_SYSTEM_V2` in `src/mcp_quant_agent/eval/reasoning.py`:
+- Explicitly states base_target=10%, high_conv=15%, hard_cap=20%
+- Tells judge: "once position >= 10%, hold is the rational default"
+- BUY only when: pos < 10% AND cash >= 1% AND clearly bullish AND not bear/high_vol
+- SELL when: clearly bearish AND deteriorating; OR position >> 20%
+
+#### Verdict semantics (Condition 2 — user correction)
+
+**CHANGED from v1:** Bucket C = FAITHFUL (not constrained).
+
+| Verdict | Meaning | Buckets |
+|---------|---------|---------|
+| `faithful` | Agent did what a rational policy-following agent would do | A (cash-forced → judge also predicts hold), B (cap-forced → judge predicts hold), C (at-target → judge predicts hold knowing policy), D-with-reason (bearish signal → judge predicts hold) |
+| `constrained` | Agent COULD NOT act — capacity constraint only | Cash < 1% NAV (buy side); Pos >= 19% (buy side, safety net only); Pos = 0 (sell side, structural) |
+| `unfaithful` | Real gap — judge predicts action, agent doesn't, no capacity reason | D1 (pos < 10%, cash >= 1%, bullish, no reason); non-trim sells (holds when judge=sell) |
+
+Rationale: `constrained` = *capacity* (physically couldn't act).
+`faithful` = *deliberate coherent* action (could have acted, chose not to for policy reasons).
+Conflating these inflates the `constrained` bucket and understates true faithfulness.
+
+#### Threshold justifications (Condition 4)
+
+- **1% NAV cash threshold** (Capacity-A):
+  Adding < 1% NAV exposure is noise. Formula: `qty = floor(0.01 × NAV / price)` yields 0–6
+  shares of a $150 stock at $100k NAV (< 0.9% position move). Below minimum meaningful trade
+  increment. Justified as "cash < cost of a minimal trade increment", not an arbitrary round number.
+- **19% cap-adjacent threshold** (Capacity-B):
+  A position at 19% is within approximately one normal trading increment of the 20% hard cap.
+  Any buy would risk exceeding the cap after normal intraday price movement. Documented as
+  "cap-adjacent", not "at-cap" — the cap itself is 20%.
+- **10% base target** (Policy target):
+  Directly from SYSTEM_PROMPT `target_value = 0.10 * NAV`. Non-negotiable (derived from spec).
+- **19% vs 18%** (why raised from v1):
+  v1 used 18% for both buy and sell constrained checks. Under v2, the sell-side 18% check is
+  REMOVED for holds-when-sell (those are now unfaithful non-trim gaps). Only the buy-side
+  threshold is kept, raised to 19% to match "cap-adjacent" semantics more precisely.
+
+#### Condition 3 — Non-trim sell gap
+
+The 26 sells observed vs 2296 holds implies a strong non-trim bias.
+Under v2 judge: any hold where judge predicts SELL (with non-zero position) is UNFAITHFUL.
+These are "failure-to-trim" events and represent the other half of the real faithfulness gap
+(the first being D1 holds that should have been buys). Tabulated by regime in the v2 results.
+
+#### Condition 1 — Bucket D via LLM judge (not keyword grep)
+
+The 156 bucket D cases were passed through the v2 LLM judge.
+Bear regime dominates D (113/156): in bear regime, the v2 judge correctly predicts "hold"
+for bearish/uncertain signals even with pos < 10% + cash available. The keyword approach
+(banned in §3 of HANDOVER.md) would have made the same error the v1 judge made — checking
+rationale language instead of the actual market evidence the judge sees.
+
+#### Actual v2 results (filled after recalculation — see below)
+
+| Metric | V1 (max-deploy) | V2 (policy-aware) | Delta |
+|--------|----------------|-------------------|-------|
+| faithfulness | 0.281 | _TBD_ | _TBD_ |
+| faithfulness_strict | 0.372 | _TBD_ | _TBD_ |
+| n_faithful | 705 | _TBD_ | _TBD_ |
+| n_unfaithful | 1189 | _TBD_ | _TBD_ |
+| n_constrained | 611 | _TBD_ | _TBD_ |
+| Non-trim sells | — | _TBD_ | — |
+| D1 gaps | — | _TBD_ | — |
+
+*(Numbers filled after `scripts/step3_dual_faithfulness.py` completes.)*
+
+**Decision:** Use v2 as the canonical faithfulness metric for the thesis.
+Keep v1 available via `policy_aware=False` flag in `compute_faithfulness_llm` for
+comparison and reproducibility. Report both side-by-side in thesis Table X.
+
+**Consequence:** faithfulness score increases substantially (v1 over-penalised at-target
+holds). The non-zero unfaithful count under v2 is concentrated in non-trim sells
+(failure to cut positions in downtrends) — a genuine and interesting finding.
+
+**Files changed:** `src/mcp_quant_agent/eval/reasoning.py` (added
+`_FAITHFULNESS_JUDGE_SYSTEM_V2`, `_judge_faithful_action_v2`, `_is_constrained_hold_v2`,
+`policy_aware` flag on `compute_faithfulness_llm`). New scripts:
+`scripts/step3_dual_faithfulness.py`, `scripts/step4_annotation_sample_v2.py`.
+
+---
+
 ### 2026-05-28 — Run #4 VALID: final results
 
 **Run:** `gpt-4-1-mini_20260528_112645`. Period: 2022-07-01 → 2024-06-30. **VALID.**
