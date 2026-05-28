@@ -355,7 +355,7 @@ class OpenAIBackbone:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=1024,
+            max_tokens=2048,
             # Force JSON output so _parse_decision never falls back to hold.
             # Requires the system prompt to mention "JSON" (it does).
             response_format={"type": "json_object"},
