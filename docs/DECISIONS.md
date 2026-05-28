@@ -1,5 +1,36 @@
 # Design decisions (ADR-lite)
 
+### 2026-05 — Run #4 pre-launch: retry transient OpenAI errors; raise max_tokens 1024→2048
+
+**Context (Run #4 aborted twice before first valid bar):**
+
+**Abort 1 — `InternalServerError` (HTTP 500) crashed immediately:**
+`_call_openai_async` only retried `RateLimitError` (429); all other exceptions
+hit `except Exception: raise exc` and propagated immediately.  A transient OpenAI
+500 on bar ~10 killed the run before any decisions were written.
+
+**Fix:** Expand the retry set to include `InternalServerError`, `APIConnectionError`,
+and `APITimeoutError` — all genuinely transient.  Stored in a `_RETRIABLE` tuple
+so future additions are one-line.  Same exponential back-off as 429 (1s, 2s, 4s …
+up to 32s, 6 attempts).
+
+**Abort 2 — Poisoned LLM cache from partial run:**
+The first aborted run wrote 415 truncated responses (max_tokens=1024) to the LLM
+cache before crashing.  The re-launch loaded these cache entries and produced
+`parse_error: Expecting ',' delimiter` warnings for ~16% of decisions.
+
+**Root cause of truncation:** `gpt-4.1-mini` produces chain-of-thought JSON with
+a `chain_of_thought` object + `action`/`quantity`/`rationale` — total response
+easily exceeds 1024 tokens, causing mid-JSON truncation.  Observed: "Unterminated
+string at char 3145" and `Expecting ',' delimiter` at char ~1000.
+
+**Fix:** `max_tokens` raised 1024→2048 in BOTH the async (`_call_openai_async`)
+and sync (`OpenAIBackbone.decide`) paths.  Poisoned LLM cache cleared; run
+re-launched from scratch.
+
+**Consequence:** From bar 1 onward: 5/5 responses parse cleanly, no
+`parse_error` rationales, `InternalServerError` is retried not fatal.
+
 ### 2026-05 — Run #3 post-mortem: three fixes before Run #4
 
 **Run:** `gpt-4-1-mini_20260527_005408`. FinalNAV = $86 (−99.9%). **INVALID.**
