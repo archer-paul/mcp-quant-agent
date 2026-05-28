@@ -2,6 +2,27 @@
 
 ---
 
+### 2026-05-28 - PM memory: bounded causal context utility, not enabled in smoke
+
+**Context:** TradingAgents keeps a decision memory log so later agents can reuse
+lessons from prior outcomes. The PM smoke currently validates one date only, but a
+future multi-date PM run needs a way to pass prior portfolio decisions without
+letting the prompt grow unbounded or leaking future outcomes.
+
+**Decision:** Add `PMDecisionLog`, an append-only markdown log for portfolio-level
+PM decisions. It stores target weights, cash, rationale, regimes, and later
+per-ticker realized returns. `get_past_context(t_now=...)` only returns resolved
+entries whose decision date is strictly before `t_now`, and the context is capped
+to the most recent entries. `OpenAIDiscussionBackbone` accepts an optional
+`past_context` string, but the guarded one-date smoke does not enable memory.
+
+**Consequence:** We have a tested, causal memory utility ready for a future
+multi-date PM experiment without changing the current smoke envelope. It is not
+performance evidence and should not be used until the guard is deliberately
+expanded.
+
+---
+
 ### 2026-05-28 - PM API smoke: TradingAgents-style chain, cache-first data reuse
 
 **Context:** PM v1 was intentionally stub-first. The next step is a tiny real

@@ -455,8 +455,15 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
         regimes: dict[str, str | None],
         tool_outputs: list[dict[str, Any]],
         mcp_calls: list[dict[str, Any]],
+        past_context: str = "",
     ) -> PMDiscussionResult:
-        """Run analysts, discussion, and final PM allocation."""
+        """Run analysts, discussion, and final PM allocation.
+
+        Args:
+            past_context: Optional formatted string from ``PMDecisionLog.get_past_context()``.
+                When non-empty it is prepended to the PM and analyst prompts so
+                the agents can reason about their recent allocation history.
+        """
         tickers = [ticker.upper() for ticker in tickers]
         self.cache_events = []
 
@@ -475,6 +482,7 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
                     regimes=regimes,
                     tool_outputs=tool_outputs,
                     mcp_calls=mcp_calls,
+                    past_context=past_context,
                 ),
                 max_tokens=900,
             )
@@ -608,6 +616,7 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
             current_prices=current_prices,
             regimes=regimes,
             mcp_calls=mcp_calls,
+            past_context=past_context,
         )
         raw_targets = self._call_json_chat(
             label=f"portfolio_manager:{date}:{','.join(tickers)}",
@@ -845,6 +854,7 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
         current_prices: dict[str, float],
         regimes: dict[str, str | None],
         mcp_calls: list[dict[str, Any]],
+        past_context: str = "",
     ) -> str:
         reports_payload = _reports_payload(reports)
         prices_payload = {
@@ -857,7 +867,9 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
             "positions": portfolio.get("positions", []),
             "num_trades": portfolio.get("num_trades", 0),
         }
+        past_block = f"{past_context.strip()}\n\n" if past_context.strip() else ""
         return (
+            f"{past_block}"
             f"T_NOW: {date}\n"
             f"Allowed tickers: {', '.join(tickers)}\n"
             f"Current prices:\n{json.dumps(prices_payload, indent=2, sort_keys=True)}\n\n"
@@ -882,6 +894,7 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
         regimes: dict[str, str | None],
         tool_outputs: list[dict[str, Any]],
         mcp_calls: list[dict[str, Any]],
+        past_context: str = "",
     ) -> str:
         role_tools = {
             "technical": {"get_price_history", "compute_indicators", "get_current_regime"},
@@ -898,7 +911,9 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
             for output in tool_outputs
             if str(output.get("tool")) in role_tools
         ]
+        past_block = f"{past_context.strip()}\n\n" if past_context.strip() else ""
         return (
+            f"{past_block}"
             f"T_NOW: {date}\n"
             f"Role: {role}\n"
             f"Allowed tickers: {', '.join(tickers)}\n"
