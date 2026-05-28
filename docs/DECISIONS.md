@@ -2,6 +2,293 @@
 
 ---
 
+### 2026-05-28 - PM API smoke: TradingAgents-style chain, cache-first data reuse
+
+**Context:** PM v1 was intentionally stub-first. The next step is a tiny real
+API smoke that validates the PM plumbing, Langfuse traces, `decisions.jsonl`,
+grounding, MCP call summaries, and anti-lookahead checks without changing the
+single-agent baseline methodology or opening a path to an expensive run.
+
+**Decision:** The real smoke path now mirrors the communication topology in
+`reference/TradingAgents/`: analyst reports first, then bounded Bull/Bear
+investment debate, Research Manager synthesis, Trader proposal, bounded
+Aggressive/Conservative/Neutral risk debate, and finally one Portfolio Manager
+allocation. This is implemented in `OpenAIDiscussionBackbone` with compact JSON
+artifacts for each node rather than an unbounded chat transcript. The initial
+analysts use the MCP tool outputs visible to their role; the debate/manager/trader
+risk nodes consume the structured state. The PM emits strict JSON parsed into
+`PMTargetWeights`. Invalid JSON, negative weights, unknown tickers, or leverage
+fail loudly at the parser boundary. Inside the smoke engine, an API/parsing
+failure is written explicitly as `pm_api_error` and converted to an all-cash
+fallback so the artifact is inspectable rather than silent.
+
+**Architecture boundary:** We do not import code from `reference/TradingAgents/`
+and do not move the smoke to full LangGraph yet. The smoke copies the communication
+contract and bounded state shape inside the existing PM backbone so the MCP,
+cache, JSONL, rebalancer, and evaluation plumbing remain unchanged. A full
+LangGraph implementation can replace the hand-driven node sequence later without
+changing the emitted PM decision schema.
+
+**Cost envelope:** One smoke decision is 11 cached LLM calls: 3 analysts, 2
+investment debaters, 1 Research Manager, 1 Trader, 3 risk debaters, and 1 PM. It
+still uses `settings.agent_model_dev` (`gpt-4.1-mini`) and the same prompt-hash
+disk cache as the single-agent `OpenAIBackbone`.
+
+**Guardrail:** `PMBacktestEngine(use_stub=False)` is not a general API runner. It
+requires a validated `PMSmokeGuardResult`, which is only produced by
+`scripts/run_pm_api_smoke.py`: exactly one date, one or two tickers, dev model
+only, LLM cache on, and explicit `--acknowledge-cost`. No other code path should
+start PM API calls.
+
+**Cache/data rule:** PM price loading is cache-first. Existing parquet prices are
+read from `data/cache/prices` and reused; yfinance is called only if the cache is
+missing or insufficient for the warm-up/backtest window. News remains cache-first
+via `get_news_items_cache_first`. `mcp_calls` records tool, source (`cache`,
+`api`, `cache+api`, or `in_memory`), row counts, and max timestamp so smoke logs
+can be audited for look-ahead. Tool output max timestamps must be `<= t_now`.
+
+**Observability/eval:** PM decisions include top-level `rationale`, `tool_outputs`,
+`mcp_calls`, flattened indicators, regimes, targets, communication turns, orders,
+and fills. Langfuse gets one PM observation per date with reports, communication
+state, portfolio, tool outputs, target weights, rebalance orders, and fills.
+`compute_grounding` now falls back to indicator values inside `tool_outputs`, so
+PM JSONL can be evaluated offline. Langfuse export is best-effort; a trace export
+timeout must not fail the local run.
+
+**Consequence:** The single-agent baseline remains untouched. The PM smoke is a
+methodology/plumbing artifact, not a thesis performance result. It can be rerun
+cheaply from cache, traced in Langfuse, grounded offline, and manually inspected
+before any larger PM experiment is considered.
+
+**Initial validation:** Real guarded smokes on 2026-05-28 completed on the
+TradingAgents-style path. `pm_api_smoke_20260528_222656` (2023-01-03 / AAPL)
+produced 3 analyst reports, 7 structured communication turns, all-cash target
+weights, no orders/fills, cached prices, and no MCP timestamp after `t_now`.
+`pm_api_smoke_20260528_222547` (2023-02-13 / JPM+NVDA) produced 6 analyst
+reports, the same 7-turn sequence, target weights `JPM=0.25`, `NVDA=0.70`, cash
+`0.05`, two buy orders, two fills, non-negative cash, and no future timestamps.
+Missing news cache was explicit and allowed only because `--allow-empty-news` was
+passed. These runs validate plumbing only.
+
+---
+
+### 2026-05-28 - PM V1: global portfolio manager, long-only cash-only, stub-first
+
+**Context:** The validated single-agent run remains the canonical thesis baseline. The
+next experimental phase tests whether a global portfolio manager can reduce the
+single-agent exit/trim weakness without burning OpenAI credits during plumbing.
+
+**Decision:** Add a separate `multi_agent`/PM path rather than changing the baseline
+single-agent engine. PM v1 is global by date: Technical Analyst, News Analyst, Risk
+Analyst, then a Portfolio Manager emits portfolio-level target weights. The rebalancer
+is deterministic and enforces long-only, no leverage, no shorting, and non-negative cash.
+There is no fixed 20% per-ticker cap in PM mode; concentration control is delegated to
+the PM/risk reports and the target weights.
+
+**Budget rule:** Development and tests use deterministic stubs/mocks only. OpenAI is
+forbidden during PM plumbing. Any later API smoke test must be explicitly separated from
+the full run, limited to 1 date and 1-2 tickers on the cheap model with the LLM cache on,
+and the logs must be manually inspected before any larger run.
+
+**Consequence:** PM logs are written as daily portfolio decisions with analyst reports,
+targets, rebalance orders, fills, and tool outputs in `decisions.jsonl`. Stub PM results
+are plumbing artifacts only and must not be cited as thesis performance evidence.
+`scripts/run_pm_api_smoke.py` only validates the future smoke-test envelope in dry-run
+mode by default; the actual PM API engine path remains blocked until a real PM API
+backbone is implemented.
+
+---
+
+### 2026-05-28 - HUMAN ANNOTATION: simplified policy for v2 judge validation
+
+**Context:** The 80-row `annotation_sample_v2.csv` needed a human review pass. Initial
+manual inspection found that the v2 judge can still over-call `buy` around the 10% base
+target when signals are weak (e.g. JPM at 9.9% in a range regime), but the broader v2
+policy is acceptable if interpreted as a simple allocation policy.
+
+**Decision:** Human annotations were filled using the following simplified policy:
+
+- Base/moderate target = 10% NAV.
+- Strong-conviction target = 15% NAV.
+- If position is effectively at target and signals are weak/mixed, `hold` is coherent.
+- If position is below 10% and signals are clearly positive with feasible cash, `buy`
+  toward target is coherent.
+- Between 15% and 20%, do not add; `hold` is coherent if signals are not deteriorating.
+- Above 20%, trim is mandatory: human action = `sell`.
+- Zero-fill `buy` intentions are interpreted through the policy, but the agreement is
+  with the judge's predicted rational action.
+
+`annotation_sample_v2.csv` was updated in place; `annotation_sample_v2_strata_audit.csv`
+was regenerated with the same human columns. `scripts/compute_agreement.py` was updated
+to support v2 columns (`v2_judge_predicted`, `human_agrees_v2`) and derived v2 strata.
+
+**Result:** 80/80 rows annotated. Judge-vs-human action agreement = **83.8%**,
+Cohen's kappa = **0.705**. Because the sample is stratified, the per-stratum result is
+more important than the global score:
+
+| Stratum | n | Agreement |
+|---|---:|---:|
+| Non-trim sell | 25 | 100.0% |
+| Other hold-judge / agent-buy | 13 | 100.0% |
+| Other sell-judge / agent-buy | 6 | 100.0% |
+| Other hold-judge / agent-sell | 3 | 100.0% |
+| Faithful reclassified from v1 unfaithful | 15 | 80.0% |
+| Faithful persistent/other | 10 | 70.0% |
+| D1 buy gap | 8 | 12.5% |
+
+**Consequence:** V2 is sufficiently validated for the thesis as a policy-aware judge,
+especially for the dominant non-trim finding. The remaining weakness is narrow and
+interpretable: D1 cases around the 10% threshold with weak/mixed signals. Do not spend
+more time redesigning the single-agent judge unless needed for writing; proceed to the
+portfolio-manager / multi-agent phase.
+
+---
+
+### 2026-05-28 - AUDIT CORRECTION: JSONL-only NVDA return, cap status, non-trim recount
+
+**Context:** The previous offline non-trim audit stated that "NVDA +980%" drove the
+613 non-trim sells and flagged 56 "sell->buy" cases as buys above the 20% cap. The user
+requested a source-of-truth audit using only
+`runs/gpt-4-1-mini_20260528_112645/decisions.jsonl` for prices. No yfinance refetch,
+no parquet price read, no agent rerun, and no API calls were used. V2 judge actions were
+read only from `runs/.faithfulness_cache_v2/`; raw LLM requested quantities were matched
+from `runs/.llm_cache/`.
+
+#### NVDA return: no external price-series contamination found
+
+The JSONL close series is internally consistent: `bars_recent[-1].close` equals
+`indicators.close` for all 2505 decisions.
+
+| Measure from JSONL closes | Value |
+|---|---:|
+| Start close, 2022-07-01 | 14.523 |
+| End close, 2024-06-28 | 123.540 |
+| Total start-to-end return | +750.7% |
+| Annualised return, 252-trading-day convention | +194.2% |
+| Baseline CSV `annualised_return` | +194.2% |
+
+**Decision:** The canonical NVDA Buy & Hold comparator remains the annualised
+`+194.2%` from the JSONL close series, matching `results/baselines_20260526_235938.csv`.
+The previous `+980%` statement is not a start-to-end Buy & Hold return. It is reproducible
+from the same JSONL series as a trough-to-late-June move, e.g. 2022-10-10 close 11.67 to
+2024-06-25 close 126.09 = +980.5%. No evidence was found that the audit used a yfinance
+refetch or any off-JSONL price series.
+
+**Consequence:** The previous narrative "NVDA +980% appreciation drives the finding" is
+retired. The ticker/regime count of non-trim sells is not invalidated by price-source
+contamination because it is based on judge/action labels, not external prices.
+
+#### 56 `judge=sell`, `agent_action=buy` cases above 20% NAV
+
+All 56 cases were buy *intentions* written as `action=buy`, not executed buys.
+The engine computed `capped=0` in every case, wrote `quantity=0`, and produced no fill.
+
+| Check | Result |
+|---|---:|
+| Cases | 56 |
+| Raw LLM requested shares | 1,167 total |
+| JSONL quantity after engine cap | 0 for all 56 |
+| Filled quantity / notional | 0 shares / $0 |
+| Engine `capped` value | 0 for all 56 |
+| Tickers | MSFT 19, AAPL 18, NVDA 7, XOM 7, JPM 5 |
+| Regimes | bull 52, high_vol 4 |
+
+AAPL 2022-07-14 to 2022-07-18 illustrates the mechanism:
+
+| Date | Raw qty | Fill qty | Price | NAV | Pct before | Held | Max total | Capped | Pct after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2022-07-14 | 20 | 0 | 148.47 | 99,037.23 | 20.39% | 136 | 133 | 0 | 20.39% |
+| 2022-07-15 | 20 | 0 | 150.17 | 99,823.03 | 20.46% | 136 | 132 | 0 | 20.46% |
+| 2022-07-18 | 33 | 0 | 147.07 | 99,431.95 | 20.12% | 136 | 135 | 0 | 20.12% |
+
+Detailed per-case state is stored in
+`results/gpt-4-1-mini_20260528_112645/cap_audit_sell_judge_agent_buy_over20.csv`.
+
+**Decision:** This is not an active regression of the structural buy cap. It is case (c):
+the position crossed above 20% through mark-to-market appreciation after a valid near-cap
+entry, then the agent attempted to buy again; the engine blocked every attempted buy.
+
+**Consequence:** Financial metrics are not threatened: these 56 cases changed NAV by $0.
+The reasoning/action audit needs a wording caveat: `action=buy` can mean "agent intended
+to buy but the engine filled zero". Across the whole run, 183 decisions have `action=buy`,
+but only 96 have an executed buy fill; 87 buy intentions had no fill (59 capped to zero,
+28 rejected for insufficient cash).
+
+#### Clean non-trim recount from JSONL-only state
+
+The v2 residual remains 825 unfaithful decisions. The dominant finding survives without
+the `+980%` narrative: 613 are still non-trim sells (`judge=sell`, `agent=hold`). The
+classification was redone using the last **filled** buy, not the last `action=buy`
+(because zero-fill capped buy intentions are not entries).
+
+| Category | Total | Bear | Bull | High_vol | Range |
+|---|---:|---:|---:|---:|---:|
+| Non-trim: buy-push over 20% | 612 | 100 | 358 | 91 | 63 |
+| Non-trim: under-20 sell signal | 1 | 1 | 0 | 0 | 0 |
+| True D1 buy gaps | 8 | 4 | 2 | 0 | 2 |
+| Other: judge hold, agent buy, filled | 91 | 19 | 29 | 34 | 9 |
+| Other: judge hold, agent buy, zero/rejected | 31 | 1 | 26 | 4 | 0 |
+| Other: judge sell, agent buy, zero-capped over 20% | 56 | 0 | 52 | 4 | 0 |
+| Other: judge hold, agent sell | 25 | 12 | 3 | 9 | 1 |
+| Other: judge buy, agent sell | 1 | 1 | 0 | 0 | 0 |
+| **Total v2 unfaithful** | **825** | **138** | **470** | **142** | **75** |
+
+Ticker x regime for the 613 non-trim sells is unchanged:
+
+| Ticker | Total | Bear | Bull | High_vol | Range |
+|---|---:|---:|---:|---:|---:|
+| AAPL | 45 | 18 | 17 | 7 | 3 |
+| JPM | 83 | 12 | 46 | 6 | 19 |
+| MSFT | 16 | 2 | 7 | 0 | 7 |
+| NVDA | 409 | 63 | 243 | 75 | 28 |
+| XOM | 60 | 6 | 45 | 3 | 6 |
+| **Total** | **613** | **101** | **358** | **91** | **63** |
+
+Detailed rows are stored in
+`results/gpt-4-1-mini_20260528_112645/non_trim_clean_recount_jsonl.csv`.
+
+**Decision:** The thesis finding is reframed as an exit-management gap after near-cap
+entries: the agent builds positions to approximately the hard cap, then does not trim
+when the judge sees a sell/trim condition. It is not explained by an NVDA price-source
+artifact and not explained by a live engine cap regression.
+
+**Consequence:** V2 faithfulness remains the canonical thesis metric (`0.671`). The
+qualitative diagnosis is stronger and cleaner: "limited exit/trim discipline after
+near-cap entries", with a separate caveat that some `buy` actions in reasoning outputs
+were blocked by the engine and had no financial effect.
+
+#### Annotation sample v2 stratification
+
+The 80-row sample is diagnostic/stratified, not representative.
+
+| Derived stratum | Verdict | N |
+|---|---|---:|
+| Non-trim sell | unfaithful | 25 |
+| D1 buy gap | unfaithful | 8 |
+| Other judge hold, agent buy | unfaithful | 13 |
+| Other judge sell, agent buy | unfaithful | 6 |
+| Other judge hold, agent sell | unfaithful | 3 |
+| Faithful reclassified from v1 unfaithful | faithful | 15 |
+| Faithful persistent/other | faithful | 10 |
+| **Total** |  | **80** |
+
+Non-trim sells are under-represented inside the unfaithful sample: 25/55 = 45.5% of
+sampled unfaithful rows vs 613/825 = 74.3% of the full v2 residual. Unfaithful rows are
+over-represented overall: 55/80 = 68.8% in the sample vs 825/2505 = 32.9% in the full run.
+Derived strata are stored in
+`results/gpt-4-1-mini_20260528_112645/annotation_sample_v2_strata_audit.csv`.
+
+**Decision:** Use `annotation_sample_v2.csv` for targeted judge validation, but report
+human agreement by stratum. Do not report one global Cohen's kappa as if the sample were
+random/representative. If an overall population agreement is needed, draw a separate
+random sample and report it separately.
+
+**Consequence:** Manual annotation can proceed with this caveat. The main thesis text
+should distinguish diagnostic agreement (per stratum) from any future representative
+agreement estimate.
+
+---
+
 ### 2026-05-28 — PRE-REGISTRATION: policy-aware faithfulness judge (v2)
 
 **Context:** Run #4 faithfulness (v1 judge) = 0.281 overall, 0.372 strict. Diagnostic showed
@@ -154,7 +441,12 @@ holds). The non-zero unfaithful count under v2 is concentrated in non-trim sells
 
 ---
 
-### 2026-05-28 — AUDIT: non-trim sell decomposition (pre-annotation, offline)
+### 2026-05-28 — AUDIT: non-trim sell decomposition (pre-annotation, offline) [SUPERSEDED]
+
+**Superseded by the JSONL-only audit correction above.** The ticker/regime count
+of 613 non-trim sells remains valid, but the `+980%` NVDA narrative and the
+611/2 buy-push/drift split are no longer canonical. The corrected recount uses
+only `decisions.jsonl` closes and the last **filled** buy.
 
 **Context:** V2 faithfulness = 0.671. Dominant finding: 613 holds where v2 judge predicts
 SELL (74% of 825 unfaithful). User hypothesised these might be appreciation-drift artifacts
