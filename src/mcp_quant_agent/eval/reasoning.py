@@ -615,7 +615,10 @@ def compute_faithfulness_llm(
     _constrained_fn = _is_constrained_hold_v2 if policy_aware else _is_constrained_hold
     _judge: Callable[[dict[str, Any]], str | None] = _judge_raw
 
-    valid = [d for d in decisions if d.get("action") not in ("error",)]
+    valid = [
+        d for d in decisions
+        if d.get("action") not in ("error",) and not d.get("is_error", False)
+    ]
     if max_decisions is not None and len(valid) > max_decisions:
         rng = random.Random(seed)
         valid = rng.sample(valid, max_decisions)
@@ -1175,7 +1178,11 @@ def compute_pm_faithfulness(
     """
     _consensus_fn = _analyst_consensus_fn or _pm_analyst_consensus
 
-    pm_only = [d for d in decisions if d.get("mode") == "multi_agent_pm"]
+    # Exclude error fallback decisions: they are not real PM allocations.
+    pm_only = [
+        d for d in decisions
+        if d.get("mode") == "multi_agent_pm" and not d.get("is_error", False)
+    ]
     pm_only = sorted(pm_only, key=lambda d: str(d.get("date", "")))
 
     n_faithful = 0

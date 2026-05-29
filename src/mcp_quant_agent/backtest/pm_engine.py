@@ -271,6 +271,7 @@ class PMBacktestEngine:
             )
 
             t_start = time.perf_counter()
+            _pm_is_error = False
             discussion: list[dict[str, Any]] = []
             if self.use_stub:
                 state = run_pm_stub(
@@ -307,15 +308,22 @@ class PMBacktestEngine:
                             "PM backbone must return PMDiscussionResult or PMTargetWeights"
                         )
                 except Exception as exc:  # noqa: BLE001
-                    error = f"pm_api_error: {type(exc).__name__}: {exc}"
+                    raw_snippet = getattr(exc, "_raw_completion", "")[:300]
+                    error = (
+                        f"pm_api_error: {type(exc).__name__}: {exc}"
+                        + (f" [raw={raw_snippet!r}]" if raw_snippet else "")
+                    )
                     errors.append(error)
-                    logger.warning("%s", error)
+                    logger.error(
+                        "PM API ERROR on %s: %s", date_str, error
+                    )
                     targets = PMTargetWeights(
                         date=date_str,
                         weights={},
                         cash_weight=1.0,
                         rationale=f"{error}; explicit all-cash fallback",
                     )
+                    _pm_is_error = True
             latency_ms = round((time.perf_counter() - t_start) * 1000.0, 1)
 
             # Store decision in the memory log (pending until J+1 returns known).
@@ -384,6 +392,7 @@ class PMBacktestEngine:
                 nav_after=nav_after,
                 latency_ms=latency_ms,
                 errors=errors,
+                is_error=_pm_is_error,
             )
             entry = decision.model_dump()
             all_entries.append(entry)
@@ -407,6 +416,17 @@ class PMBacktestEngine:
                 )
 
         all_entries.sort(key=lambda entry: (entry["date"], entry["ticker"]))
+
+        # Fail-loud error rate: any pm_api_error is a data-quality issue.
+        n_errors = sum(1 for e in all_entries if e.get("is_error", False))
+        if n_errors > 0:
+            logger.error(
+                "PM run %s: %d/%d decisions are pm_api_error (excluded from eval). "
+                "Do NOT cite eval metrics from this run until errors are investigated.",
+                self.run_id, n_errors, len(all_entries),
+            )
+        else:
+            logger.info("PM run %s: 0 pm_api_error decisions.", self.run_id)
 
         metrics = compute_all_metrics(nav_series) if len(nav_series) > 1 else {}
         sharpe_ci = bootstrap_sharpe_ci(nav_series) if len(nav_series) > 10 else {}
@@ -435,6 +455,7 @@ class PMBacktestEngine:
             "sharpe_ci": sharpe_ci,
             "n_bars": len(nav_series),
             "n_decisions": len(all_entries),
+            "n_pm_errors": n_errors,
             "tickers": self.tickers,
             "start_date": self.start_date,
             "end_date": self.end_date,
@@ -502,8 +523,10 @@ class PMBacktestEngine:
             _get_cache,
         )
 
+        # 380 calendar days ≈ 270 trading days > 252 (vol_percentile_window for regime v2).
+        # Ensures the causal vol threshold is computed on a full trailing year at bar 1.
         warmup_start = (
-            dt.date.fromisoformat(self.start_date) - dt.timedelta(days=130)
+            dt.date.fromisoformat(self.start_date) - dt.timedelta(days=380)
         ).isoformat()
         loaded: dict[str, list[dict[str, Any]]] = {}
         cache = _get_cache()

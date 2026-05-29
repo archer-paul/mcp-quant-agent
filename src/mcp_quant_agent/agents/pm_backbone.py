@@ -140,6 +140,59 @@ def _truncate_text(value: Any, limit: int = 1000) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _news_item_counts(
+    tool_outputs: list[dict[str, Any]],
+    tickers: list[str],
+) -> dict[str, int]:
+    """Return {ticker: n_news_items} from tool outputs.
+
+    Used to gate the news analyst: if all tickers have 0 items, the LLM call
+    must be skipped — calling it with empty news contaminates reports with
+    hallucinated evidence from other visible tool outputs.
+    """
+    counts: dict[str, int] = dict.fromkeys(tickers, 0)
+    for output in tool_outputs:
+        if str(output.get("tool")) != "get_news_items_cache_first":
+            continue
+        ticker = str(output.get("ticker", "")).strip().upper()
+        if ticker in counts:
+            counts[ticker] = int(output.get("items_count", 0))
+    return counts
+
+
+# Marker prefix used to identify unavailable analyst reports in eval code.
+_UNAVAILABLE_SUMMARY_PREFIX = "sentiment_unavailable"
+
+
+def _make_unavailable_news_reports(
+    date: str,
+    tickers: list[str],
+    reason: str = "no news items in cache",
+) -> list[AnalystReport]:
+    """Emit explicit unavailable markers for the news analyst.
+
+    These reports have ``confidence=0.0`` so they contribute zero weight to the
+    consensus in ``compute_pm_faithfulness``.  The ``summary`` starts with
+    ``_UNAVAILABLE_SUMMARY_PREFIX`` so they can be identified and excluded from
+    qualitative eval tables.
+
+    This function must be called instead of the LLM when news data is absent.
+    It is the only acceptable substitute for a real news analyst call.
+    """
+    return [
+        AnalystReport(
+            date=date,
+            ticker=ticker.upper(),
+            analyst="news",
+            signal="neutral",
+            confidence=0.0,
+            summary=f"{_UNAVAILABLE_SUMMARY_PREFIX}: {reason}",
+            evidence=[],
+        )
+        for ticker in tickers
+    ]
+
+
 def _bounded_str_list(value: Any, *, limit: int, item_limit: int = 200) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -189,15 +242,24 @@ def parse_pm_target_response(
     the decision record.
     """
     text = _strip_markdown_fences(raw)
+
+    def _raise(msg: str) -> None:
+        """Attach raw completion to the error for fail-loud diagnostics."""
+        exc = ValueError(msg)
+        exc._raw_completion = raw[:500]  # type: ignore[attr-defined]
+        raise exc
+
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError("PM response is not valid JSON") from exc
+        err = ValueError(f"PM response is not valid JSON: {exc}")
+        err._raw_completion = raw[:500]  # type: ignore[attr-defined]
+        raise err from exc
 
     if not isinstance(payload, dict):
-        raise ValueError("PM response must be a JSON object")
+        _raise("PM response must be a JSON object")
     if "cash_weight" not in payload:
-        raise ValueError("PM response missing required cash_weight")
+        _raise("PM response missing required cash_weight")
 
     raw_weights = payload.get("weights")
     if raw_weights is None and "target_weights" in payload:
@@ -467,8 +529,32 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
         tickers = [ticker.upper() for ticker in tickers]
         self.cache_events = []
 
+        # Check news availability BEFORE calling the news analyst LLM.
+        # If ALL tickers have 0 news items, calling the LLM would contaminate the
+        # news reports with hallucinated evidence from technical indicator data visible
+        # in the prompt. Instead, emit explicit "sentiment_unavailable" markers.
+        news_counts = _news_item_counts(tool_outputs, tickers)
+        news_available = any(n > 0 for n in news_counts.values())
+
         reports: list[AnalystReport] = []
         for role in ANALYST_ROLES:
+            if role == "news" and not news_available:
+                # Gate: skip LLM call entirely; emit unavailable markers.
+                reports.extend(
+                    _make_unavailable_news_reports(
+                        date=date,
+                        tickers=tickers,
+                        reason=(
+                            f"0 news items in cache for all tickers "
+                            f"({', '.join(f'{t}:{news_counts.get(t,0)}' for t in sorted(tickers))})"
+                        ),
+                    )
+                )
+                logger.info(
+                    "News analyst skipped for %s: no news data for any ticker.", date
+                )
+                continue
+
             raw = self._call_json_chat(
                 label=f"analyst:{role}:{date}:{','.join(tickers)}",
                 system=ANALYST_SYSTEM_PROMPT.format(role=role),
@@ -911,7 +997,38 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
             for output in tool_outputs
             if str(output.get("tool")) in role_tools
         ]
+        # Filter MCP call summaries to role-relevant tools to prevent cross-role contamination.
+        visible_mcp_calls = [
+            call for call in mcp_calls
+            if str(call.get("tool", "")) in role_tools
+        ]
         past_block = f"{past_context.strip()}\n\n" if past_context.strip() else ""
+
+        if role == "news":
+            # News analyst prompt: STRICTLY news-only data.
+            # DO NOT include current_prices, regimes, portfolio, indicators, or any
+            # compact_market_data_summary — these contaminate the evidence and cause
+            # the LLM to fabricate news sentiment from technical indicator values.
+            # The only legitimate data source is get_news_items_cache_first output.
+            news_instruction = (
+                "IMPORTANT: Base your reports ONLY on the news items provided below.\n"
+                "If news_items_count=0 for a ticker, you MUST emit:\n"
+                "  {\"ticker\": \"TICKER\", \"signal\": \"neutral\", \"confidence\": 0.0, "
+                "\"summary\": \"sentiment_unavailable: 0 news items in cache\", \"evidence\": []}\n"
+                "Do NOT use price, indicator, or regime data as evidence."
+            )
+            return (
+                f"{past_block}"
+                f"T_NOW: {date}\n"
+                f"Role: {role}\n"
+                f"Allowed tickers: {', '.join(tickers)}\n"
+                f"\n{news_instruction}\n\n"
+                f"News tool outputs (ONLY valid evidence source):\n"
+                f"{json.dumps(visible_tool_outputs, indent=2, sort_keys=True, default=str)}\n\n"
+                f"News MCP call summaries:\n"
+                f"{json.dumps(visible_mcp_calls, indent=2, sort_keys=True, default=str)}\n"
+            )
+
         return (
             f"{past_block}"
             f"T_NOW: {date}\n"
@@ -921,7 +1038,7 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
             f"Regimes:\n{json.dumps(regimes, indent=2, sort_keys=True)}\n\n"
             f"Portfolio:\n{json.dumps(portfolio, indent=2, sort_keys=True, default=str)}\n\n"
             f"Role-visible MCP tool outputs:\n{json.dumps(visible_tool_outputs, indent=2, sort_keys=True, default=str)}\n\n"
-            f"MCP call summaries:\n{json.dumps(mcp_calls, indent=2, sort_keys=True, default=str)}\n\n"
+            f"MCP call summaries:\n{json.dumps(visible_mcp_calls, indent=2, sort_keys=True, default=str)}\n\n"
             "Compact market data summary:\n"
             f"{json.dumps(_compact_market_data_summary(market_data), indent=2, sort_keys=True, default=str)}\n"
         )

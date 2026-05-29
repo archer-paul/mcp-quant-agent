@@ -215,6 +215,13 @@ class DailyPMDecision(BaseModel):
     nav_after: float = Field(ge=0.0)
     latency_ms: float = Field(default=0.0, ge=0.0)
     errors: list[str] = Field(default_factory=list)
+    is_error: bool = Field(
+        default=False,
+        description=(
+            "True when this decision is an error fallback (pm_api_error). "
+            "Error decisions MUST be excluded from all eval tables and metrics."
+        ),
+    )
 
     @field_validator("date")
     @classmethod

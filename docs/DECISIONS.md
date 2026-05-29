@@ -2,6 +2,92 @@
 
 ---
 
+### 2026-05-29 - 4 bugs diagnosed via Langfuse traces and fixed
+
+**Context:** Langfuse spans (GENERATION level) revealed concrete bugs in the PM multi-agent
+chain that were invisible from the JSONL surface (all-cash decisions and "constrained"
+faithfulness scores looked correct but were masking data quality issues).
+
+---
+
+**Bug #1 — NEWS ANALYST HALLUCINATION (critical, was polluting consensus)**
+
+Root cause: `_build_analyst_prompt` for the "news" role included `_compact_market_data_summary`
+(with full technical indicators: SMA, MACD, RSI, Bollinger Bands, regime labels, recent closes)
+as well as `current_prices`, `regimes`, `portfolio` — none of which are valid news evidence.
+When `get_news_items_cache_first` returned 0 items, the LLM fabricated "news" sentiment by
+copying technical indicator values into the evidence field, e.g.:
+  - "MACD histogram is slightly negative at -0.019475"
+  - "Close price 172.07 is above 20-day SMA 168.944"
+  - "RSI is elevated at 66.61"
+
+This was confirmed for ALL 12 news reports across all 4 dates in the bull window B (2023-05-15→18).
+Each report had `news_mcp: row_count=0, max_timestamp=None` but `confidence=0.7-0.9`.
+
+**Fix:**
+1. `_news_item_counts(tool_outputs, tickers)` — helper to count actual news items per ticker.
+2. Gate in `OpenAIDiscussionBackbone.decide()`: if ALL tickers have 0 news items, skip the LLM
+   call entirely and emit `_make_unavailable_news_reports()` — structured markers with
+   `confidence=0.0` and `summary=f"sentiment_unavailable: ..."`.
+3. Separate news analyst prompt (`role == "news"` branch in `_build_analyst_prompt`):
+   removes `_compact_market_data_summary`, `current_prices`, `regimes`, `portfolio`;
+   only shows `visible_tool_outputs` (news items) and role-filtered `mcp_calls`.
+4. `_UNAVAILABLE_SUMMARY_PREFIX = "sentiment_unavailable"` — constant for programmatic detection.
+
+**Consensus impact:** `confidence=0.0` means unavailable news contributes zero weight
+(`role_weight × 0 × confidence = 0`). Technical and risk analysts are unaffected.
+
+**Quantitative impact on bull window B:**
+- NVDA consensus 2023-05-18: +0.890 → +0.665 after removing fake news (delta=-0.225)
+- PM faithfulness verdict unchanged: 0.667/0.857 (threshold was still exceeded in both cases)
+- Bear window: 9/9 constrained — verified as genuine all-cash decisions, not pm_api_error fallbacks
+
+**Tests added:** `test_news_item_counts_*`, `test_make_unavailable_news_reports_*`,
+`test_unavailable_news_contributes_zero_to_consensus`, `test_news_report_evidence_must_not_contain_technical_indicator_keywords`.
+
+---
+
+**Bug #2/#3 — FAIL-LOUD PM ERROR PATH**
+
+Root cause: the `except Exception` handler in `PMBacktestEngine.run()` captured all PM failures
+silently as `pm_api_error` rationale and produced an all-cash fallback.  The raw completion
+that caused the failure was not captured, and the decision was indistinguishable from a
+legitimate all-cash allocation in eval tables.
+
+**Fix:**
+- `parse_pm_target_response` attaches `exc._raw_completion = raw[:500]` to every raised
+  `ValueError` so the engine can log it.
+- Engine logs at `logger.error(...)` level (not `warning`) for PM errors.
+- `DailyPMDecision.is_error: bool = False` field explicitly tags error fallbacks.
+- `n_pm_errors` in run output; logged as ERROR if > 0 with message "do not cite metrics".
+- `compute_faithfulness_llm` and `compute_pm_faithfulness` both filter out `is_error=True`
+  decisions before scoring.
+
+---
+
+**Bug #4 — WARMUP 130→380 CALENDAR DAYS**
+
+Root cause: both `BacktestEngine` and `PMBacktestEngine` pre-fetched 130 calendar days
+of warmup (~90 trading days), well below the `vol_percentile_window=252` for the v2 regime
+detector.  At bar 1, the regime detector had only ~90 historical vols to compute the
+trailing 80th-percentile threshold, so HIGH_VOL labels on the first ~162 bars used a
+compressed window — documented limitation but avoidable with a longer warmup.
+
+**Fix:** Both engines now use 380 calendar days (~270 trading days > 252).  The expanded
+warmup ensures the vol threshold is computed on ≥252 bars from bar 1 of the backtest window.
+Note: for the full 2-year run (start 2022-07-01), the warmup reaches 2021-07-12 — all
+OHLCV data is available for the 5 canonical tickers.
+
+---
+
+**Consequence:**
+- Future PM runs will not hallucinate news sentiment from technical data.
+- PM error fallbacks are explicitly tagged and excluded from all metrics.
+- Regime vol threshold is correctly initialised at bar 1 for bounded windows.
+- 356 tests pass (6 new tests added for news gating).
+
+---
+
 ### 2026-05-29 - Real-LLM bounded eval: single-agent + PM, bear+bull windows, multi-seed
 
 **Context:** After locking the methodological core (eval pipeline), the next step

@@ -175,7 +175,7 @@ class BacktestEngine:
         # _fetch_raw_bars bypasses the parquet cache; perceive_ticker calls
         # get_price_history which reads from cache → empty → 0 bars → None.
         # Fix: extend pre-fetch by WARMUP_DAYS and call cache.merge_and_write.
-        _WARMUP_DAYS = 130  # ~90 trading days — covers 20d regime warm-up + regime vol baseline
+        _WARMUP_DAYS = 380  # ~270 trading days — covers vol_percentile_window=252 for regime v2
         warmup_start = (
             dt.date.fromisoformat(self.start_date) - dt.timedelta(days=_WARMUP_DAYS)
         ).isoformat()
