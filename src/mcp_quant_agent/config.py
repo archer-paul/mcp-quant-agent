@@ -57,7 +57,11 @@ class Settings(BaseSettings):
 
     # ── News scraping ─────────────────────────────────────────────────────────
     firecrawl_api_key: str = Field(
-        default="", description="Firecrawl API key for timestamped news corpus."
+        default="",
+        description=(
+            "Firecrawl API key for optional scraping experiments. Not recommended "
+            "for the thesis news corpus because crawl time is not publication time."
+        ),
     )
 
     # ── Caching ───────────────────────────────────────────────────────────────
@@ -80,6 +84,18 @@ class Settings(BaseSettings):
             "One-way transaction cost in basis points applied to every buy and sell. "
             "10 bps = 5 bps commission + 5 bps slippage, matching baselines.py. "
             "Must be identical for agent AND baselines for a fair comparison."
+        ),
+    )
+
+    # ── News corpus (experimental, off the critical path) ─────────────────────
+    news_corpus_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the timestamped news corpus for the sentiment analyst. "
+            "OFF by default — the news analyst falls back to sentiment_unavailable. "
+            "Only activate after the corpus passes the anti-lookahead test on real "
+            "data (see docs/DECISIONS.md 'News integration scaffold'). The corpus "
+            "is filtered by published_at <= t_now at read time."
         ),
     )
 

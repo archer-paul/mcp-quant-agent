@@ -28,11 +28,20 @@ from mcp.server.fastmcp import FastMCP
 from mcp_quant_agent.clock import SimulationClock, set_clock
 from mcp_quant_agent.mcp_servers.data.finnhub_source import (
     get_earnings_calendar as _get_earnings,
+)
+from mcp_quant_agent.mcp_servers.data.finnhub_source import (
     get_news_items as _get_news,
+)
+from mcp_quant_agent.mcp_servers.data.finnhub_source import (
     get_recent_news as _recent_news,
+)
+from mcp_quant_agent.mcp_servers.data.news_corpus_cache import (
+    get_news_corpus as _get_news_corpus,
 )
 from mcp_quant_agent.mcp_servers.data.yfinance_source import (
     get_latest_price as _get_latest_price,
+)
+from mcp_quant_agent.mcp_servers.data.yfinance_source import (
     get_price_history as _get_price_history,
 )
 
@@ -133,6 +142,21 @@ async def get_recent_news(ticker: str, days_back: int = 7) -> str:
     """
     items = _recent_news(ticker, days_back=days_back)
     return json.dumps(items, indent=2)
+
+
+@mcp.tool()
+async def get_news_corpus(
+    ticker: str,
+    limit: int = 10,
+    strict: bool = False,
+) -> str:
+    """Return timestamped corpus news filtered by published_at <= t_now.
+
+    The corpus is gated by settings.news_corpus_enabled and is disabled by
+    default.  If disabled, this returns a sentiment_unavailable marker.
+    """
+    payload = _get_news_corpus(ticker, limit=limit, strict=strict)
+    return json.dumps(payload, indent=2)
 
 
 # ---------------------------------------------------------------------------
