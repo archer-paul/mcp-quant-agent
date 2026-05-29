@@ -131,7 +131,10 @@ def _news_node(state: PMGraphState) -> dict[str, Any]:
 
     for ticker in state["tickers"]:
         news = state["market_data"].get(ticker, {}).get("news", [])
-        joined = " ".join(str(item.get("headline", "")).lower() for item in news[:5])
+        joined = " ".join(
+            str(item.get("headline") or item.get("title") or "").lower()
+            for item in news[:5]
+        )
         pos_hits = sum(word in joined for word in positive)
         neg_hits = sum(word in joined for word in negative)
 
@@ -157,9 +160,9 @@ def _news_node(state: PMGraphState) -> dict[str, Any]:
                 confidence=confidence,
                 summary=summary,
                 evidence=[
-                    str(item.get("headline", ""))[:120]
+                    str(item.get("headline") or item.get("title") or "")[:120]
                     for item in news[:3]
-                    if item.get("headline")
+                    if item.get("headline") or item.get("title")
                 ],
             )
         )

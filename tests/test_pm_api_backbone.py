@@ -147,6 +147,14 @@ def test_news_item_counts_detects_nonzero_items() -> None:
     assert counts["NVDA"] == 3
 
 
+def test_news_item_counts_detects_news_corpus_items() -> None:
+    tool_outputs = [
+        {"tool": "get_news_corpus", "ticker": "AAPL", "items_count": 2},
+    ]
+    counts = _news_item_counts(tool_outputs, ["AAPL"])
+    assert counts["AAPL"] == 2
+
+
 def test_make_unavailable_news_reports_returns_one_per_ticker() -> None:
     """Unavailable marker reports must be produced for all tickers."""
     reports = _make_unavailable_news_reports("2023-01-03", ["AAPL", "MSFT", "NVDA"])

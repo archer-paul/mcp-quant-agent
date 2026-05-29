@@ -151,8 +151,9 @@ def _news_item_counts(
     hallucinated evidence from other visible tool outputs.
     """
     counts: dict[str, int] = dict.fromkeys(tickers, 0)
+    news_tools = {"get_news_items_cache_first", "get_news_corpus"}
     for output in tool_outputs:
-        if str(output.get("tool")) != "get_news_items_cache_first":
+        if str(output.get("tool")) not in news_tools:
             continue
         ticker = str(output.get("ticker", "")).strip().upper()
         if ticker in counts:
@@ -402,8 +403,13 @@ def _compact_market_data_summary(
             "news_count": len(news),
             "recent_news": [
                 {
-                    "datetime": item.get("datetime") or item.get("date"),
-                    "headline": _truncate_text(item.get("headline", ""), 160),
+                    "datetime": item.get("datetime")
+                    or item.get("published_at")
+                    or item.get("date"),
+                    "headline": _truncate_text(
+                        item.get("headline") or item.get("title") or "",
+                        160,
+                    ),
                 }
                 for item in news[:3]
                 if isinstance(item, dict)
@@ -984,7 +990,7 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
     ) -> str:
         role_tools = {
             "technical": {"get_price_history", "compute_indicators", "get_current_regime"},
-            "news": {"get_news_items_cache_first"},
+            "news": {"get_news_items_cache_first", "get_news_corpus"},
             "risk": {
                 "get_portfolio",
                 "get_current_regime",
@@ -1009,7 +1015,7 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
             # DO NOT include current_prices, regimes, portfolio, indicators, or any
             # compact_market_data_summary — these contaminate the evidence and cause
             # the LLM to fabricate news sentiment from technical indicator values.
-            # The only legitimate data source is get_news_items_cache_first output.
+            # The only legitimate data source is news tool output.
             news_instruction = (
                 "IMPORTANT: Base your reports ONLY on the news items provided below.\n"
                 "If news_items_count=0 for a ticker, you MUST emit:\n"

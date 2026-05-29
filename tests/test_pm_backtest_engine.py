@@ -136,6 +136,63 @@ def test_pm_engine_excludes_future_news_from_tool_outputs() -> None:
     assert "Future headline must not leak" not in headlines
 
 
+def test_pm_engine_can_use_enabled_news_corpus(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from mcp_quant_agent.config import settings
+    from mcp_quant_agent.mcp_servers.data import news_corpus_cache as corpus_module
+    from mcp_quant_agent.mcp_servers.data.news_corpus_cache import NewsCorpusCache
+
+    cache = NewsCorpusCache(tmp_path / "news_corpus")
+    cache.write_corpus(
+        "AAPL",
+        [
+            {
+                "ticker": "AAPL",
+                "published_at": "2022-02-01T09:00:00",
+                "title": "Apple reports strong growth",
+                "body": "Past causal article.",
+                "source": "unit",
+                "url": "past",
+            },
+            {
+                "ticker": "AAPL",
+                "published_at": "2022-03-01T09:00:00",
+                "title": "Future article must not leak",
+                "body": "Future article.",
+                "source": "unit",
+                "url": "future",
+            },
+        ],
+    )
+    monkeypatch.setattr(settings, "news_corpus_enabled", True)
+    monkeypatch.setattr(corpus_module, "NewsCorpusCache", lambda: cache)
+
+    engine = PMBacktestEngine(
+        tickers=["AAPL"],
+        start_date="2022-02-02",
+        end_date="2022-02-02",
+        price_data={"AAPL": _price_data()["AAPL"]},
+        news_data=None,
+        write_artifacts=False,
+        run_id="pm_news_corpus_test",
+    )
+    results = engine.run()
+
+    news_outputs = [
+        output
+        for entry in results["decisions_all"]
+        for output in entry["tool_outputs"]
+        if output.get("tool") == "get_news_corpus"
+    ]
+    assert news_outputs
+    headlines = [
+        item["headline"]
+        for output in news_outputs
+        for item in output.get("items_recent", [])
+    ]
+    assert "Apple reports strong growth" in headlines
+    assert "Future article must not leak" not in headlines
+
+
 def test_pm_engine_is_deterministic_ignoring_latency() -> None:
     first = _run_engine()["decisions_all"]
     second = _run_engine()["decisions_all"]
@@ -382,7 +439,10 @@ def test_pm_engine_no_warmup_excluded_and_no_none_regime_with_adequate_history(
     """
     import datetime as _dt
 
-    from mcp_quant_agent.eval.reasoning import _extract_decision_regime, _segment_by_regime
+    from mcp_quant_agent.eval.reasoning import (
+        _extract_decision_regime,
+        _segment_by_regime,
+    )
     from mcp_quant_agent.mcp_servers.analytics.regime import (
         REGIME_WARMUP_CALENDAR_DAYS,
         REGIME_WARMUP_TRADING_DAYS,

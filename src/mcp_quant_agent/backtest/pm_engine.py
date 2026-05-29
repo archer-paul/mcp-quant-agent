@@ -245,6 +245,7 @@ class PMBacktestEngine:
                         ticker=ticker,
                         bars=bars_full,
                         news=news,
+                        news_tool=self._news_tool_name(),
                         indicators=indicators,
                         regime=regime,
                     )
@@ -609,6 +610,30 @@ class PMBacktestEngine:
             filtered = clock.filter_rows(items, date_key="datetime") if items else []
             return sorted(filtered, key=lambda item: str(item["datetime"]), reverse=True)
 
+        from mcp_quant_agent.config import settings
+
+        if settings.news_corpus_enabled:
+            from mcp_quant_agent.mcp_servers.data.news_corpus_cache import (
+                NewsCorpusCache,
+            )
+
+            start = (dt.date.fromisoformat(date_str) - dt.timedelta(days=30)).isoformat()
+            try:
+                corpus_items = NewsCorpusCache().read_filtered(
+                    ticker,
+                    limit=100,
+                    strict=True,
+                )
+            except RuntimeError:
+                if not self.allow_empty_news:
+                    raise
+                return []
+            return [
+                item
+                for item in corpus_items
+                if start <= str(item.get("published_at", ""))[:10] <= date_str
+            ][:10]
+
         from mcp_quant_agent.mcp_servers.data.finnhub_source import (
             get_news_items_cache_first,
         )
@@ -622,6 +647,13 @@ class PMBacktestEngine:
             date_str,
             offline=self.news_offline,
         )
+
+    def _news_tool_name(self) -> str:
+        if self.news_data is not None:
+            return "get_news_items_cache_first"
+        from mcp_quant_agent.config import settings
+
+        return "get_news_corpus" if settings.news_corpus_enabled else "get_news_items_cache_first"
 
     @staticmethod
     def _positions_with_pct(portfolio_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -664,12 +696,14 @@ class PMBacktestEngine:
         news_source = (
             "in_memory"
             if self.news_data is not None
+            else "news_corpus"
+            if self._news_tool_name() == "get_news_corpus"
             else "cache"
             if self.news_offline
             else "cache_or_api"
         )
         bars_ts = self._max_timestamp(bars, "date")
-        news_ts = self._max_timestamp(news, "datetime", "date")
+        news_ts = self._max_timestamp(news, "datetime", "published_at", "date")
         return [
             {
                 "ticker": ticker,
@@ -747,6 +781,7 @@ class PMBacktestEngine:
         ticker: str,
         bars: list[dict[str, Any]],
         news: list[dict[str, Any]],
+        news_tool: str,
         indicators: dict[str, Any],
         regime: str | None,
     ) -> list[dict[str, Any]]:
@@ -770,13 +805,19 @@ class PMBacktestEngine:
             },
             {
                 "ticker": ticker,
-                "tool": "get_news_items_cache_first",
+                "tool": news_tool,
                 "items_count": len(news),
-                "max_timestamp": PMBacktestEngine._max_timestamp(news, "datetime", "date"),
+                "max_timestamp": PMBacktestEngine._max_timestamp(
+                    news,
+                    "datetime",
+                    "published_at",
+                    "date",
+                ),
                 "items_recent": [
                     {
-                        "datetime": item.get("datetime", ""),
-                        "headline": str(item.get("headline", ""))[:120],
+                        "datetime": item.get("datetime")
+                        or item.get("published_at", ""),
+                        "headline": str(item.get("headline") or item.get("title") or "")[:120],
                     }
                     for item in news[:3]
                 ],
