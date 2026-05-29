@@ -76,6 +76,12 @@ def test_news_corpus_disabled_returns_unavailable_without_reading(tmp_path, monk
     assert payload["reason"] == "news_corpus_enabled=False"
 
 
+def test_default_news_corpus_cache_uses_settings_dir(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(settings, "news_corpus_dir", tmp_path)
+    cache = NewsCorpusCache()
+    assert cache.parquet_path("AAPL") == tmp_path / "AAPL.parquet"
+
+
 def test_missing_corpus_raises_in_strict_enabled_mode(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(settings, "news_corpus_enabled", True)
 

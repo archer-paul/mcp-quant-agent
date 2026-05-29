@@ -4,6 +4,7 @@ import datetime as dt
 
 from mcp_quant_agent.mcp_servers.data.news_corpus_sources import (
     enrich_articles_with_firecrawl,
+    fetch_alpha_vantage_news_sentiment,
     fetch_finnhub_company_news,
     fetch_firecrawl_news_search,
 )
@@ -43,6 +44,59 @@ def test_fetch_finnhub_company_news_maps_to_corpus_schema(monkeypatch) -> None: 
     )
 
     rows = fetch_finnhub_company_news(
+        "AAPL",
+        start_date="2023-01-01",
+        end_date="2023-01-31",
+        api_key="test",
+    )
+
+    assert rows == [
+        {
+            "ticker": "AAPL",
+            "published_at": "2023-01-05T14:30:00",
+            "title": "Apple beats expectations",
+            "body": "Record profit and strong growth.",
+            "source": "unit",
+            "url": "https://example.test/a",
+        }
+    ]
+
+
+def test_fetch_alpha_vantage_news_sentiment_maps_to_corpus_schema(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_get(url, params, timeout):  # type: ignore[no-untyped-def]
+        assert params["function"] == "NEWS_SENTIMENT"
+        assert params["tickers"] == "AAPL"
+        assert params["time_from"] == "20230101T0000"
+        assert params["time_to"] == "20230131T2359"
+        return _Response(
+            {
+                "feed": [
+                    {
+                        "time_published": "20230105T143000",
+                        "title": "Apple beats expectations",
+                        "summary": "Record profit and strong growth.",
+                        "source": "unit",
+                        "url": "https://example.test/a",
+                        "ticker_sentiment": [{"ticker": "AAPL"}],
+                    },
+                    {
+                        "time_published": "20230105T153000",
+                        "title": "Broad market story",
+                        "summary": "Not ticker specific.",
+                        "source": "unit",
+                        "url": "https://example.test/b",
+                        "ticker_sentiment": [{"ticker": "MSFT"}],
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.news_corpus_sources.requests.get",
+        fake_get,
+    )
+
+    rows = fetch_alpha_vantage_news_sentiment(
         "AAPL",
         start_date="2023-01-01",
         end_date="2023-01-31",

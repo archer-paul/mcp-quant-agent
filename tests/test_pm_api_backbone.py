@@ -6,12 +6,16 @@ import pytest
 
 from mcp_quant_agent.agents.pm_backbone import (
     _UNAVAILABLE_SUMMARY_PREFIX,
+    _complete_news_reports,
     _make_unavailable_news_reports,
+    _news_evidence_from_tool_outputs,
     _news_item_counts,
+    _repair_news_report_evidence,
     parse_analyst_reports_response,
     parse_discussion_response,
     parse_pm_target_response,
 )
+from mcp_quant_agent.agents.pm_schemas import AnalystReport
 
 
 def test_pm_parser_accepts_valid_target_json() -> None:
@@ -153,6 +157,98 @@ def test_news_item_counts_detects_news_corpus_items() -> None:
     ]
     counts = _news_item_counts(tool_outputs, ["AAPL"])
     assert counts["AAPL"] == 2
+
+
+def test_news_evidence_from_tool_outputs_includes_source_and_datetime() -> None:
+    tool_outputs = [
+        {
+            "tool": "get_news_corpus",
+            "ticker": "AAPL",
+            "items_recent": [
+                {
+                    "datetime": "2023-01-04T13:30:00",
+                    "headline": "Apple supplier demand improves",
+                    "source": "Reuters",
+                    "body_excerpt": "Shipment expectations improved.",
+                }
+            ],
+        }
+    ]
+
+    evidence = _news_evidence_from_tool_outputs(tool_outputs, "AAPL")
+
+    assert evidence == [
+        "Reuters 2023-01-04T13:30:00: Apple supplier demand improves - Shipment expectations improved."
+    ]
+
+
+def test_repair_news_report_evidence_replaces_uncited_paraphrase() -> None:
+    report = AnalystReport(
+        date="2023-01-04",
+        ticker="AAPL",
+        analyst="news",
+        signal="bullish",
+        confidence=0.6,
+        summary="news improved",
+        evidence=["headlines looked positive"],
+    )
+    tool_outputs = [
+        {
+            "tool": "get_news_corpus",
+            "ticker": "AAPL",
+            "items_recent": [
+                {
+                    "datetime": "2023-01-04T13:30:00",
+                    "headline": "Apple supplier demand improves",
+                    "source": "Reuters",
+                    "body_excerpt": "Shipment expectations improved.",
+                }
+            ],
+        }
+    ]
+
+    repaired = _repair_news_report_evidence([report], tool_outputs)
+
+    assert repaired[0].evidence[0].startswith("Reuters 2023-01-04T13:30:00")
+
+
+def test_complete_news_reports_fills_omitted_ticker_with_neutral_evidence() -> None:
+    parsed = parse_analyst_reports_response(
+        (
+            '{"reports": [{"ticker": "AAPL", "signal": "neutral", '
+            '"confidence": 0.3, "summary": "mixed", "evidence": []}]}'
+        ),
+        date="2023-01-04",
+        role="news",
+        allowed_tickers=["AAPL", "NVDA"],
+        allow_missing=True,
+    )
+    tool_outputs = [
+        {
+            "tool": "get_news_corpus",
+            "ticker": "NVDA",
+            "items_recent": [
+                {
+                    "datetime": "2023-01-04T13:30:00",
+                    "headline": "Nvidia unveils datacenter chip",
+                    "source": "Reuters",
+                    "body_excerpt": "The launch expands datacenter options.",
+                }
+            ],
+        }
+    ]
+
+    reports = _complete_news_reports(
+        parsed,
+        date="2023-01-04",
+        tickers=["AAPL", "NVDA"],
+        tool_outputs=tool_outputs,
+    )
+
+    nvda = [report for report in reports if report.ticker == "NVDA"][0]
+    assert nvda.signal == "neutral"
+    assert nvda.confidence == pytest.approx(0.3)
+    assert nvda.evidence[0].startswith("Reuters 2023-01-04T13:30:00")
 
 
 def test_make_unavailable_news_reports_returns_one_per_ticker() -> None:

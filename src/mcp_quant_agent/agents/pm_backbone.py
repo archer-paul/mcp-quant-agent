@@ -194,6 +194,120 @@ def _make_unavailable_news_reports(
     ]
 
 
+def _news_evidence_from_tool_outputs(
+    tool_outputs: list[dict[str, Any]],
+    ticker: str,
+    *,
+    limit: int = 3,
+) -> list[str]:
+    """Build source/date evidence snippets from role-visible news tool output."""
+    snippets: list[str] = []
+    ticker_upper = ticker.upper()
+    news_tools = {"get_news_items_cache_first", "get_news_corpus"}
+    for output in tool_outputs:
+        if str(output.get("tool")) not in news_tools:
+            continue
+        if str(output.get("ticker", "")).upper() != ticker_upper:
+            continue
+        for item in output.get("items_recent", []):
+            if not isinstance(item, dict):
+                continue
+            published = str(
+                item.get("datetime")
+                or item.get("published_at")
+                or item.get("date")
+                or ""
+            ).strip()
+            headline = _truncate_text(
+                item.get("headline") or item.get("title") or "",
+                110,
+            )
+            if not published or not headline:
+                continue
+            source = _truncate_text(item.get("source") or "source_unknown", 40)
+            excerpt = _truncate_text(
+                item.get("body_excerpt") or item.get("summary") or item.get("body") or "",
+                80,
+            )
+            snippet = f"{source} {published[:19]}: {headline}"
+            if excerpt:
+                snippet = f"{snippet} - {excerpt}"
+            snippets.append(_truncate_text(snippet, 200))
+            if len(snippets) >= limit:
+                return snippets
+    return snippets
+
+
+def _news_evidence_has_source_date(
+    evidence: list[str],
+    tool_outputs: list[dict[str, Any]],
+    ticker: str,
+) -> bool:
+    evidence_text = "\n".join(evidence).lower()
+    if not evidence_text:
+        return False
+    for snippet in _news_evidence_from_tool_outputs(tool_outputs, ticker, limit=5):
+        parts = snippet.split(":", maxsplit=1)[0].split()
+        if len(parts) < 2:
+            continue
+        source = parts[0].lower()
+        date = parts[1][:10].lower()
+        if date in evidence_text and source in evidence_text:
+            return True
+    return False
+
+
+def _repair_news_report_evidence(
+    reports: list[AnalystReport],
+    tool_outputs: list[dict[str, Any]],
+) -> list[AnalystReport]:
+    """Ensure non-empty news reports cite real source/date snippets from tools."""
+    repaired: list[AnalystReport] = []
+    for report in reports:
+        snippets = _news_evidence_from_tool_outputs(tool_outputs, report.ticker)
+        if snippets and not _news_evidence_has_source_date(
+            report.evidence,
+            tool_outputs,
+            report.ticker,
+        ):
+            repaired.append(report.model_copy(update={"evidence": snippets}))
+        else:
+            repaired.append(report)
+    return repaired
+
+
+def _complete_news_reports(
+    reports: list[AnalystReport],
+    *,
+    date: str,
+    tickers: list[str],
+    tool_outputs: list[dict[str, Any]],
+) -> list[AnalystReport]:
+    """Fill any ticker omitted by the LLM news analyst with a neutral report."""
+    by_ticker = {report.ticker: report for report in reports}
+    for ticker in [item.upper() for item in tickers]:
+        if ticker in by_ticker:
+            continue
+        evidence = _news_evidence_from_tool_outputs(tool_outputs, ticker)
+        if evidence:
+            by_ticker[ticker] = AnalystReport(
+                date=date,
+                ticker=ticker,
+                analyst="news",
+                signal="neutral",
+                confidence=0.3,
+                summary="news present but omitted by model; neutral fallback",
+                evidence=evidence,
+            )
+        else:
+            by_ticker[ticker] = _make_unavailable_news_reports(
+                date,
+                [ticker],
+                reason="0 news items in cache",
+            )[0]
+    return sorted(by_ticker.values(), key=lambda report: report.ticker)
+
+
 def _bounded_str_list(value: Any, *, limit: int, item_limit: int = 200) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -293,6 +407,7 @@ def parse_analyst_reports_response(
     date: str,
     role: str,
     allowed_tickers: list[str],
+    allow_missing: bool = False,
 ) -> list[AnalystReport]:
     """Parse one analyst agent response into strict report schemas."""
     text = _strip_markdown_fences(raw)
@@ -328,7 +443,7 @@ def parse_analyst_reports_response(
         )
 
     missing = sorted(allowed - seen)
-    if missing:
+    if missing and not allow_missing:
         raise ValueError(f"{role} analyst omitted tickers: {missing}")
     return sorted(reports, key=lambda report: report.ticker)
 
@@ -578,14 +693,25 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
                 ),
                 max_tokens=900,
             )
-            reports.extend(
-                parse_analyst_reports_response(
-                    raw,
-                    date=date,
-                    role=role,
-                    allowed_tickers=tickers,
-                )
+            parsed_reports = parse_analyst_reports_response(
+                raw,
+                date=date,
+                role=role,
+                allowed_tickers=tickers,
+                allow_missing=role == "news",
             )
+            if role == "news":
+                parsed_reports = _complete_news_reports(
+                    parsed_reports,
+                    date=date,
+                    tickers=tickers,
+                    tool_outputs=tool_outputs,
+                )
+                parsed_reports = _repair_news_report_evidence(
+                    parsed_reports,
+                    tool_outputs,
+                )
+            reports.extend(parsed_reports)
 
         discussion: list[dict[str, Any]] = []
         state = self._create_tradingagents_state(
@@ -1021,6 +1147,9 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
                 "If news_items_count=0 for a ticker, you MUST emit:\n"
                 "  {\"ticker\": \"TICKER\", \"signal\": \"neutral\", \"confidence\": 0.0, "
                 "\"summary\": \"sentiment_unavailable: 0 news items in cache\", \"evidence\": []}\n"
+                "For non-empty news, every evidence entry MUST include the article source and "
+                "published datetime shown in the tool output, e.g. "
+                "\"Reuters 2023-01-04T13:30:00: headline or excerpt\".\n"
                 "Do NOT use price, indicator, or regime data as evidence."
             )
             return (

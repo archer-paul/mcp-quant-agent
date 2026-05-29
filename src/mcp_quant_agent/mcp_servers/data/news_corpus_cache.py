@@ -99,9 +99,13 @@ class NewsCorpusCache:
 
     def __init__(
         self,
-        corpus_dir: str | Path = _CORPUS_DIR,
+        corpus_dir: str | Path | None = None,
         max_items: int = _DEFAULT_MAX_ITEMS,
     ) -> None:
+        if corpus_dir is None:
+            from mcp_quant_agent.config import settings
+
+            corpus_dir = settings.news_corpus_dir
         self._dir = Path(corpus_dir)
         self.max_items = max_items
 

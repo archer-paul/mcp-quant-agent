@@ -714,7 +714,7 @@ class PMBacktestEngine:
             },
             {
                 "ticker": ticker,
-                "tool": "get_news_items_cache_first",
+                "tool": self._news_tool_name(),
                 "source": news_source,
                 "row_count": len(news),
                 "max_timestamp": news_ts,
@@ -818,6 +818,10 @@ class PMBacktestEngine:
                         "datetime": item.get("datetime")
                         or item.get("published_at", ""),
                         "headline": str(item.get("headline") or item.get("title") or "")[:120],
+                        "source": str(item.get("source") or "")[:80],
+                        "body_excerpt": str(
+                            item.get("summary") or item.get("body") or ""
+                        )[:240],
                     }
                     for item in news[:3]
                 ],
@@ -876,6 +880,8 @@ class PMBacktestEngine:
             ["calmar", round(float(metrics.get("calmar", 0.0)), 4)],
             ["max_drawdown", round(float(metrics.get("max_drawdown", 0.0)), 4)],
             ["hit_rate", round(float(metrics.get("hit_rate", 0.0)), 4)],
+            ["cost_drag_bps", round(float(metrics.get("cost_drag_bps", 0.0)), 2)],
+            ["turnover_pct", round(float(metrics.get("turnover_pct", 0.0)), 2)],
         ]
         csv_path = results_dir / "summary.csv"
         with open(csv_path, "w", newline="", encoding="utf-8") as fh:

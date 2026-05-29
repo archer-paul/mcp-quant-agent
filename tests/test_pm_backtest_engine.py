@@ -225,6 +225,9 @@ def test_pm_engine_writes_decisions_jsonl(tmp_path: Path) -> None:
     assert len(rows) == results["n_decisions"]
     assert rows[0]["reports"]
     assert "ret=" in memory_path.read_text(encoding="utf-8")
+    summary_text = summary_path.read_text(encoding="utf-8")
+    assert "cost_drag_bps" in summary_text
+    assert "turnover_pct" in summary_text
 
 
 def test_pm_engine_loads_prices_from_existing_cache_without_fetch(

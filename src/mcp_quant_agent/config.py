@@ -42,6 +42,10 @@ class Settings(BaseSettings):
 
     # ── Market data ───────────────────────────────────────────────────────────
     finnhub_api_key: str = Field(default="", description="Finnhub API key.")
+    alpha_vantage_api_key: str = Field(
+        default="",
+        description="Alpha Vantage API key for optional timestamped news corpus population.",
+    )
     financial_datasets_api_key: str = Field(
         default="", description="financial-datasets.ai API key."
     )
@@ -97,6 +101,10 @@ class Settings(BaseSettings):
             "data (see docs/DECISIONS.md 'News integration scaffold'). The corpus "
             "is filtered by published_at <= t_now at read time."
         ),
+    )
+    news_corpus_dir: Path = Field(
+        default=Path("./data/cache/news_corpus"),
+        description="Directory containing <TICKER>.parquet timestamped news corpus files.",
     )
 
     model_config = SettingsConfigDict(

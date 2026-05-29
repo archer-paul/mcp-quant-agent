@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from mcp_quant_agent.mcp_servers.data.news_corpus_cache import NewsCorpusCache
 from mcp_quant_agent.mcp_servers.data.news_corpus_sources import (
     enrich_articles_with_firecrawl,
+    fetch_alpha_vantage_news_sentiment,
     fetch_finnhub_company_news,
     fetch_firecrawl_news_search,
 )
@@ -37,7 +38,13 @@ def main(
     ),
     source: str = typer.Option(
         "finnhub",
-        help="Primary source: finnhub or firecrawl-search.",
+        help="Primary source: finnhub, alpha-vantage, or firecrawl-search.",
+    ),
+    alpha_vantage_limit: int = typer.Option(
+        1000,
+        min=1,
+        max=1000,
+        help="Max Alpha Vantage feed rows per ticker.",
     ),
     firecrawl_limit_per_ticker: int = typer.Option(
         10,
@@ -71,6 +78,7 @@ def main(
         "start_date": start_date,
         "end_date": end_date,
         "corpus_dir": str(corpus_dir),
+        "alpha_vantage_limit": alpha_vantage_limit,
         "firecrawl_limit_per_ticker": firecrawl_limit_per_ticker,
         "allow_modified_timestamp": allow_modified_timestamp,
         "allow_search_result_date": allow_search_result_date,
@@ -88,6 +96,16 @@ def main(
                 start_date=start_date,
                 end_date=end_date,
             )
+        elif source == "alpha-vantage":
+            typer.echo(
+                f"Fetching {ticker} {start_date}->{end_date} from Alpha Vantage..."
+            )
+            articles = fetch_alpha_vantage_news_sentiment(
+                ticker,
+                start_date=start_date,
+                end_date=end_date,
+                limit=alpha_vantage_limit,
+            )
         elif source == "firecrawl-search":
             typer.echo(
                 f"Searching {ticker} {start_date}->{end_date} with Firecrawl news..."
@@ -101,7 +119,9 @@ def main(
                 allow_search_result_date=allow_search_result_date,
             )
         else:
-            raise typer.BadParameter("source must be 'finnhub' or 'firecrawl-search'")
+            raise typer.BadParameter(
+                "source must be 'finnhub', 'alpha-vantage', or 'firecrawl-search'"
+            )
 
         if enrich_firecrawl and max_enrich_per_ticker > 0 and articles:
             typer.echo(f"  Firecrawl enrichment: first {max_enrich_per_ticker} URL(s)")

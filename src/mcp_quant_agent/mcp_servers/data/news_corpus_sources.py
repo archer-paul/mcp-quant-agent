@@ -18,6 +18,7 @@ from mcp_quant_agent.mcp_servers.data.news_corpus_cache import (
 logger = logging.getLogger(__name__)
 
 FINNHUB_COMPANY_NEWS_URL = "https://finnhub.io/api/v1/company-news"
+ALPHA_VANTAGE_QUERY_URL = "https://www.alphavantage.co/query"
 FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape"
 FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v2/search"
 
@@ -44,6 +45,16 @@ _MODIFIED_METADATA_KEYS = (
 def _utc_naive_iso_from_unix(raw: Any) -> str:
     parsed = dt.datetime.fromtimestamp(float(raw), tz=dt.UTC).replace(tzinfo=None)
     return parsed.isoformat(timespec="seconds")
+
+
+def _parse_alpha_vantage_time(raw: Any) -> str:
+    text = str(raw or "").strip()
+    for fmt in ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M"):
+        try:
+            return dt.datetime.strptime(text, fmt).isoformat(timespec="seconds")
+        except ValueError:
+            continue
+    return _parse_published_at(text).isoformat(timespec="seconds")
 
 
 def fetch_finnhub_company_news(
@@ -89,6 +100,81 @@ def fetch_finnhub_company_news(
                 "title": str(item.get("headline") or ""),
                 "body": str(item.get("summary") or ""),
                 "source": str(item.get("source") or "Finnhub"),
+                "url": str(item.get("url") or ""),
+            }
+        )
+    return dedupe_articles(rows)
+
+
+def fetch_alpha_vantage_news_sentiment(
+    ticker: str,
+    *,
+    start_date: str,
+    end_date: str,
+    api_key: str | None = None,
+    limit: int = 1000,
+    timeout: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Fetch Alpha Vantage NEWS_SENTIMENT rows and map to corpus schema."""
+    key = api_key if api_key is not None else settings.alpha_vantage_api_key
+    if not key:
+        raise RuntimeError("ALPHA_VANTAGE_API_KEY is not set.")
+
+    start = dt.date.fromisoformat(start_date)
+    end = dt.date.fromisoformat(end_date)
+    params: dict[str, str | int] = {
+        "function": "NEWS_SENTIMENT",
+        "tickers": ticker.upper(),
+        "time_from": start.strftime("%Y%m%dT0000"),
+        "time_to": end.strftime("%Y%m%dT2359"),
+        "sort": "LATEST",
+        "limit": limit,
+        "apikey": key,
+    }
+    response = requests.get(
+        ALPHA_VANTAGE_QUERY_URL,
+        params=params,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if "Note" in payload or "Information" in payload:
+        message = str(payload.get("Note") or payload.get("Information"))
+        raise RuntimeError(f"Alpha Vantage returned an informational response: {message}")
+    feed = payload.get("feed", [])
+    if not isinstance(feed, list):
+        raise RuntimeError(f"Unexpected Alpha Vantage response for {ticker}: {payload!r}")
+
+    rows: list[dict[str, Any]] = []
+    for item in feed:
+        if not isinstance(item, dict):
+            continue
+        raw_time = item.get("time_published")
+        if not raw_time:
+            continue
+        try:
+            published_at = _parse_alpha_vantage_time(raw_time)
+        except ValueError:
+            continue
+        # Alpha Vantage sometimes returns broad market stories.  Keep only rows
+        # whose ticker_sentiment explicitly contains the requested ticker when
+        # the field is present.
+        ticker_sentiment = item.get("ticker_sentiment")
+        if isinstance(ticker_sentiment, list) and ticker_sentiment:
+            mentioned = {
+                str(row.get("ticker", "")).upper()
+                for row in ticker_sentiment
+                if isinstance(row, dict)
+            }
+            if ticker.upper() not in mentioned:
+                continue
+        rows.append(
+            {
+                "ticker": ticker.upper(),
+                "published_at": published_at,
+                "title": str(item.get("title") or ""),
+                "body": str(item.get("summary") or ""),
+                "source": str(item.get("source") or "AlphaVantage"),
                 "url": str(item.get("url") or ""),
             }
         )
@@ -208,7 +294,10 @@ def fetch_firecrawl_news_search(
     start = dt.date.fromisoformat(start_date)
     end = dt.date.fromisoformat(end_date)
     for row in rows:
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        raw_metadata = row.get("metadata")
+        metadata: dict[str, Any] = (
+            raw_metadata if isinstance(raw_metadata, dict) else {}
+        )
         timestamp_kind = "published_metadata"
         raw_ts = _first_metadata_timestamp(metadata, _PUBLICATION_METADATA_KEYS)
         if raw_ts is None and allow_modified_timestamp:
