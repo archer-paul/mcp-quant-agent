@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from mcp_quant_agent.agents.pm_backbone import TRADINGAGENTS_STYLE_LLM_CALLS
 
-_MAX_MULTIDAY_DATES = 10
+_MAX_MULTIDAY_DATES = 22  # aligned with TIER_LIMITS["medium"].max_trading_dates
 _MAX_MULTIDAY_TICKERS = 3
 
 

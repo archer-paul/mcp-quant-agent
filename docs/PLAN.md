@@ -165,6 +165,28 @@ C'est là que tu peux innover et c'est explicitement dans l'intitulé. Pistes :
 
 ---
 
+## 3b. Echelles de run (tiers)
+
+Trois niveaux documentés dans `backtest/tier.py`. Chaque run doit indiquer son tier dans
+les rapports : les résultats sont étiquetés "smoke-scale", "medium-scale", etc.
+
+| Tier | Dates max | Tickers max | Warmup requis | Coût-ack | Usage |
+|------|-----------|-------------|---------------|----------|-------|
+| **smoke** | 5 | 3 | REGIME_WARMUP_CALENDAR_DAYS (420j) | non | Dev, CI, smoke tests |
+| **medium** | 22 (~1 mois) | 3 | idem | oui | Première validation réelle par régime |
+| **full** | illimité | 10 | idem | oui | Run final unique de thèse |
+
+**Règle warmup obligatoire pour tous les tiers :** la fenêtre de DONNÉES = fenêtre décision +
+`REGIME_WARMUP_CALENDAR_DAYS` (420j) pour garantir `n_warmup_excluded=0` dès la 1ère
+décision. Les deux engines importent `REGIME_WARMUP_CALENDAR_DAYS` depuis `regime.py`.
+
+**Fenêtre medium recommandée :** AAPL+MSFT+NVDA, 2023-01-03→2023-01-31 (19 trading days,
+bear→bull→range transition). Justification : Jan 2023 est le premier mois de récupération
+après le crash 2022 — la 20d-trend passe de bear (début janvier) à bull (mi-janvier) pour
+AAPL/MSFT. Données en cache depuis Run #4 → re-runs $0.
+
+---
+
 ## 4. Planning jour par jour (2 semaines)
 
 > Règle d'or : à la fin de **chaque** journée tu dois avoir un truc qui tourne. Pas de big bang d'intégration en J13.

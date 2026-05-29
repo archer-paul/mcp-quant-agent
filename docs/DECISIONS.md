@@ -2,6 +2,78 @@
 
 ---
 
+### 2026-05-29 - Medium-scale run: first real eval with transaction costs (10 bps symmetric)
+
+**Context:** The previous bounded runs had no transaction costs (agent paid 0 bps, baselines paid
+10 bps — an asymmetry that invalidated any performance comparison).  This ADR documents the
+symmetric cost fix and the first medium-scale real-LLM run.
+
+**Transaction cost fix:**
+- `Portfolio.commission_bps` field (default 0 for legacy tests / backward compat)
+- `BacktestEngine` and `PMBacktestEngine` default to `settings.transaction_cost_bps = 10 bps`
+- `settings.transaction_cost_bps = COMMISSION_BPS + SLIPPAGE_BPS = 10 bps` (verified by test)
+- `buy_and_hold` applies entry + exit costs (two bookend trades at `COST_PER_TRADE = 10 bps`)
+- `compute_all_metrics` adds `cost_drag_bps` and `turnover_pct` to output
+- Test `test_10bps_matches_baselines_cost_per_trade` asserts symmetry on every run
+
+**Tier system:** `backtest/tier.py` defines SMOKE / MEDIUM / FULL limits.  `validate_tier()`
+is called by CLI scripts before any LLM call.  `run_bounded_eval.py` now accepts `--tier`.
+
+**Medium window chosen:** AAPL+MSFT+NVDA, 2023-01-03→2023-01-31 (19 trading dates).
+Justification: Jan 2023 is the bear→recovery transition; 20d trend flips from bear to range
+in mid-January. Three regimes in one month gives non-trivial regime-segmented tables.
+All LLM calls are cache hits from canonical Run #4 → effective cost ≈ $0.
+
+**Medium-scale results (smoke-scale; NOT thesis-final):**
+
+| Metric | Single-agent | PM multi-agent |
+|--------|-------------|----------------|
+| n_decisions | 57 (3 tickers × 19 dates) | 19 (portfolio-level) |
+| Regime breakdown | bear=38, bull=14, range=5 | bear=14, range=5 (worst-case aggregate) |
+| n_warmup_excluded | 0 | 0 |
+| Grounding | 0.9886 (173/175 claims) | 0.000 (concise rationale, expected) |
+| Faithfulness overall | 0.526 (30/57) | N/A (PM metric) |
+| PM faithfulness | N/A | 0.593 overall / **0.941 strict** |
+| Bear faithfulness | 0.763 | – |
+| Bull faithfulness | **0.000** | – |
+| Constrained (PM) | N/A | 20/54 (37%) |
+| AnnReturn (tiny window) | +154.1% | +82.7% |
+| Sharpe | 5.67 | – |
+| cost_drag_bps | 6.02 | – |
+| turnover_pct | 60.22% | – |
+
+**Baselines (same 10 bps, Jan 2023, per ticker):**
+
+| Ticker | B&H Sharpe | B&H cost_drag | Mom(10d) Sharpe | MeanRev(5d) Sharpe |
+|--------|-----------|--------------|-----------------|-------------------|
+| AAPL | 8.754 | 20.02 bps | 4.961 | 0.000 |
+| MSFT | 0.658 | 20.02 bps | 3.236 | 5.319 |
+| NVDA | 7.459 | 20.02 bps | 3.056 | 0.000 |
+
+Agent portfolio Sharpe (5.67) ≈ equal-weight B&H average (5.62) on this window.
+Note: 19-bar window makes annualization highly variable; Sharpe is more stable.
+
+**Key findings (medium-scale):**
+1. Bull faithfulness = 0.000 — consistent with non-trim pattern in canonical Run #4
+2. Bear faithfulness = 0.763 — consistent with canonical Run #4 (0.731 v2)
+3. PM strict faithfulness = 0.941 — PM is more disciplined than single-agent in this window
+4. PM faithfulness = 0.593 overall because 20/54 constrained (can't reduce below 0 in bear)
+5. Memory log: 18 resolved + 1 pending — causal chain working correctly
+6. n_warmup_excluded = 0 on both paths — warmup fix validated
+7. PM news = unavailable (--allow-empty-news) → no hallucinated news signals
+8. PM unfaithful: 2 NVDA cases (neutral→increased weight; bullish→held at 35%)
+
+**Consequence:** The pipeline is validated end-to-end with symmetric costs.  Ready for
+the full 2-year run pending user approval.  The medium window shows the same qualitative
+patterns as the canonical run, giving confidence in the methodology.
+
+**Files reviewed by human before full run (in addition to previous list):**
+- `src/mcp_quant_agent/mcp_servers/execution/paper_trading.py` — commission logic
+- `src/mcp_quant_agent/eval/financial.py` — cost_drag_bps / turnover_pct formulas
+- `src/mcp_quant_agent/backtest/tier.py` — tier limits
+
+---
+
 ### 2026-05-29 - Warmup centralized: REGIME_WARMUP_CALENDAR_DAYS derived from regime parameters
 
 **Context:** The warmup "380j" in the previous session was manually chosen to approximate 252
