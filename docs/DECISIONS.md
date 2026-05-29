@@ -2,6 +2,48 @@
 
 ---
 
+### 2026-05-29 - Warmup centralized: REGIME_WARMUP_CALENDAR_DAYS derived from regime parameters
+
+**Context:** The warmup "380j" in the previous session was manually chosen to approximate 252
+trading days. But 380/1.45 ≈ 262 < 271 (the correct minimum), and the constant existed in
+two separate files. The user asked to derive it from the actual detector parameters and
+centralize it.
+
+**Regime detector parameters (confirmed from code, ALL callers use defaults, no overrides):**
+
+| Parameter | Value | Unit | Calendar equiv. |
+|-----------|-------|------|-----------------|
+| `trend_short` | 20 | trading days | ~29 calendar days |
+| `trend_long` | 60 | trading days | ~87 calendar days (diagnostic only, NOT used for labelling) |
+| `vol_window` | 20 | trading days | ~29 calendar days |
+| `vol_percentile_window` | 252 | trading days | ~365 calendar days |
+
+**The "132 calendar days for reactivity" does NOT exist as a code parameter.** The trend
+window is `trend_short=20` trading days ≈ 29 calendar days.
+
+**Controlling warmup requirement:**
+The HIGH_VOL vol threshold at bar i uses rolling_vol[i-252+1 : i+1]. The first non-None
+rolling_vol is at bar vol_window=20. For bar i of the full series to have a fully-populated
+252-vol window: `i >= vol_window + vol_percentile_window - 1 = 20 + 252 - 1 = 271`.
+Bar 0 of the backtest must be at index >= 271 → warmup needs ≥271 trading days.
+
+Calendar: `ceil(271 × 365.25/252) + 20 safety = 393 + 20 = 413 → 420` (rounded to 7).
+
+**Decision:** `REGIME_WARMUP_TRADING_DAYS = 271` and `REGIME_WARMUP_CALENDAR_DAYS = 420`
+defined in `regime.py`. Both `BacktestEngine` and `PMBacktestEngine` import this constant.
+The in-code comment documents the derivation so any change to `vol_percentile_window`
+forces a reviewer to update the constant.
+
+**Test:** `test_pm_engine_no_warmup_excluded_and_no_none_regime_with_adequate_history`
+generates REGIME_WARMUP_TRADING_DAYS+5 bars, runs PMBacktestEngine stub, asserts
+`n_warmup_excluded=0` and all regime labels non-None. This test FAILS if the constant is
+set too small or if vol_percentile_window is changed without realigning.
+
+**Consequence:** The previous 380-day warmup was short by 9 trading days for the
+vol_percentile_window. 420 calendar days ≈ 290 trading days provides a correct buffer.
+
+---
+
 ### 2026-05-29 - 4 bugs diagnosed via Langfuse traces and fixed
 
 **Context:** Langfuse spans (GENERATION level) revealed concrete bugs in the PM multi-agent

@@ -365,6 +365,81 @@ def test_pm_api_smoke_path_runs_with_mock_backbone_and_writes_artifacts(
     assert grounding["n_grounded"] >= 2
 
 
+def test_pm_engine_no_warmup_excluded_and_no_none_regime_with_adequate_history(
+    tmp_path: Path,
+) -> None:
+    """Anti-regression: when warmup is adequate, bar 0 has a fully-labelled regime.
+
+    This test FAILS if:
+    - REGIME_WARMUP_CALENDAR_DAYS is set too small, OR
+    - vol_percentile_window / vol_window in label_regimes_v2 is increased
+      without realigning the warmup constant.
+
+    Construction:
+    - Generate REGIME_WARMUP_TRADING_DAYS + 5 bars of warmup price data.
+    - Run the PM engine on 3 bars of the backtest window.
+    - Assert n_warmup_excluded == 0 and every decision has a non-None regime.
+    """
+    import datetime as _dt
+
+    from mcp_quant_agent.eval.reasoning import _extract_decision_regime, _segment_by_regime
+    from mcp_quant_agent.mcp_servers.analytics.regime import (
+        REGIME_WARMUP_CALENDAR_DAYS,
+        REGIME_WARMUP_TRADING_DAYS,
+    )
+
+    # Build warm-up + backtest price series.
+    # We need REGIME_WARMUP_TRADING_DAYS bars before the backtest start.
+    total_bars = REGIME_WARMUP_TRADING_DAYS + 5  # warmup + 5 backtest bars
+    base_start = _dt.date.fromisoformat("2020-01-02")
+    all_bars = _make_price_rows(
+        start=base_start.isoformat(),
+        n=total_bars,
+        start_close=100.0,
+        step=0.5,
+    )
+
+    # The backtest window starts at bar REGIME_WARMUP_TRADING_DAYS (0-indexed)
+    backtest_start = all_bars[REGIME_WARMUP_TRADING_DAYS]["date"]
+    backtest_end = all_bars[REGIME_WARMUP_TRADING_DAYS + 2]["date"]  # 3 dates
+
+    engine = PMBacktestEngine(
+        tickers=["AAPL"],
+        start_date=backtest_start,
+        end_date=backtest_end,
+        price_data={"AAPL": all_bars},
+        news_data={"AAPL": []},
+        allow_empty_news=True,
+        write_artifacts=False,
+        output_root=tmp_path,
+        run_id="warmup_antireg_test",
+    )
+    results = engine.run()
+    decisions = results.get("decisions_all", [])
+
+    assert len(decisions) == 3, f"Expected 3 decisions, got {len(decisions)}"
+
+    # No warm-up exclusions
+    segs = _segment_by_regime(decisions)
+    n_warmup = len(segs.pop("__warmup__", []))
+    assert n_warmup == 0, (
+        f"Expected 0 warm-up excluded decisions but got {n_warmup}. "
+        f"This means the detector produced None regime at bar 0 of the backtest window, "
+        f"indicating the warmup constant ({REGIME_WARMUP_CALENDAR_DAYS} calendar days = "
+        f"{REGIME_WARMUP_TRADING_DAYS} trading days) is insufficient."
+    )
+
+    # All decisions have a non-None regime
+    for dec in decisions:
+        regime = _extract_decision_regime(dec)
+        assert regime is not None, (
+            f"Decision {dec.get('date')} has None regime. "
+            f"The vol_percentile_window (252 bars) needs at least "
+            f"{REGIME_WARMUP_TRADING_DAYS} warmup trading bars; "
+            f"got {REGIME_WARMUP_TRADING_DAYS + 5} total (5 backtest + {REGIME_WARMUP_TRADING_DAYS} warmup)."
+        )
+
+
 def test_pm_decision_log_causal_chain_on_3_dates(tmp_path: Path) -> None:
     """PMDecisionLog must build a strictly causal chain over 3 consecutive dates.
 

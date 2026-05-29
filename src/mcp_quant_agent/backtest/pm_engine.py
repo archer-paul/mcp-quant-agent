@@ -516,17 +516,18 @@ class PMBacktestEngine:
                 self._price_sources[ticker] = "in_memory"
             return loaded_from_input
 
+        from mcp_quant_agent.mcp_servers.analytics.regime import (
+            REGIME_WARMUP_CALENDAR_DAYS,
+        )
         from mcp_quant_agent.mcp_servers.data.bar_validation import validate_bar
         from mcp_quant_agent.mcp_servers.data.yfinance_source import (
             _check_price_continuity,
             _fetch_raw_bars,
             _get_cache,
         )
-
-        # 380 calendar days ≈ 270 trading days > 252 (vol_percentile_window for regime v2).
-        # Ensures the causal vol threshold is computed on a full trailing year at bar 1.
         warmup_start = (
-            dt.date.fromisoformat(self.start_date) - dt.timedelta(days=380)
+            dt.date.fromisoformat(self.start_date)
+            - dt.timedelta(days=REGIME_WARMUP_CALENDAR_DAYS)
         ).isoformat()
         loaded: dict[str, list[dict[str, Any]]] = {}
         cache = _get_cache()

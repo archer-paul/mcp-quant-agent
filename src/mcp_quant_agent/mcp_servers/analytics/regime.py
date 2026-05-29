@@ -60,6 +60,42 @@ class Regime(StrEnum):
 
 
 # ---------------------------------------------------------------------------
+# Warmup constants — single source of truth for both BacktestEngine and
+# PMBacktestEngine.  Import here; do NOT hardcode 380 / 130 elsewhere.
+# ---------------------------------------------------------------------------
+
+# The v2 regime detector needs:
+#   - vol_window (20 bars) to produce the first non-None rolling vol
+#   - vol_percentile_window (252 bars) of non-None rolling vols to fully
+#     populate the HIGH_VOL threshold
+#
+# First non-None vol is at bar vol_window=20.
+# For bar i of the full series to have a fully-populated threshold, we need:
+#   i - vol_percentile_window + 1 <= vol_window
+#   i >= vol_window + vol_percentile_window - 1 = 20 + 252 - 1 = 271
+#
+# These are the actual DEFAULT parameters — confirmed no caller overrides them:
+#   trend_short (primary signal):   20 trading days  (~29 calendar days)
+#   vol_window  (rolling vol):      20 trading days
+#   vol_percentile_window (HIGH_VOL threshold):  252 trading days  (~365 calendar days)
+#
+# The controlling requirement is vol_percentile_window, not trend_short.
+# The "132 calendar days" is NOT a parameter in this codebase.
+
+#: Minimum trading-day warmup for a fully-populated v2 regime label at bar 0.
+#: Derived as vol_window + vol_percentile_window - 1 = 20 + 252 - 1 = 271.
+REGIME_WARMUP_TRADING_DAYS: int = 271
+
+#: Calendar-day equivalent of REGIME_WARMUP_TRADING_DAYS.
+#: Factor = 365.25/252 ≈ 1.450.  Safety margin of +20 days covers public holidays.
+#: ceil(271 × 1.450) + 20 = 393 + 20 = 413 → 420 (rounded to multiple of 7).
+#:
+#: Both BacktestEngine and PMBacktestEngine import this constant.
+#: Changing vol_percentile_window in label_regimes_v2 MUST update this constant.
+REGIME_WARMUP_CALENDAR_DAYS: int = 420
+
+
+# ---------------------------------------------------------------------------
 # v1 -- original detector (backward-compatible, kept for comparison)
 # ---------------------------------------------------------------------------
 
