@@ -34,11 +34,17 @@ quotes or paraphrases with `source + published_at`) in the `evidence` field so t
 | AlphaVantage news | `time_published` = ISO ✓ | Ticker-specific, relevance scores | Rate-limited free | Viable alternative |
 | Firecrawl | Crawl date only, not publication date | Flexible | YC credits | NOT suitable — wrong timestamp |
 
-**Decision: Finnhub cached corpus (disabled by default).**
+**Decision: cached timestamped corpus, disabled by default.**
+Primary source for the Jan 2023 medium rerun is Alpha Vantage `NEWS_SENTIMENT`.
+Finnhub remains useful for recent data, but the local free-plan key returned no
+Jan 2023 company-news rows.
+
 Reasons:
 - Finnhub already integrated in `mcp_servers/data/finnhub_source.py`
 - The `get_news_items_cache_first` tool exists and works (used in PM smoke)
 - Its `datetime` field is the Unix publication timestamp (confirmed from API docs)
+- Alpha Vantage provides ticker-filtered `time_published` rows that populated the
+  Jan 2023 AAPL/MSFT/NVDA corpus under the current free key
 - The cache pattern (parquet, filtered at read time) is already implemented for prices
 - Historical corpus for 2022-2024 can be pre-fetched once and cached to parquet
 - NOT used for live scraping — corpus is a static parquet file, filtered by `published_at <= t_now`
@@ -54,7 +60,8 @@ Reasons:
 
 **Implementation update (2026-05-29):**
 - `scripts/build_news_corpus.py` populates `data/cache/news_corpus/<TICKER>.parquet`
-  from Finnhub `/company-news`, with optional Firecrawl enrichment for article body text.
+  from Finnhub `/company-news` or Alpha Vantage `NEWS_SENTIMENT`, with optional
+  Firecrawl enrichment for article body text.
 - `PMBacktestEngine` can read the corpus when `news_corpus_enabled=True`; flag off preserves
   the existing `sentiment_unavailable` / cache-first path.
 - Firecrawl search support exists, but it is accepted only when a publication-like timestamp
@@ -64,11 +71,22 @@ Reasons:
   Jan 2023, so the available Finnhub plan appears to limit historical news access.
 - The local Firecrawl key returned HTTP 401 against `/v2/search`; Firecrawl remains coded and
   unit-tested, but not populated locally until a valid key is provided.
+- Alpha Vantage population succeeded for Jan 2023:
+  `data/cache/news_corpus_av_2023_01` with AAPL=66, MSFT=116, NVDA=39 raw rows.
+- PM news analyst prompts now see only news tool outputs; per-item evidence includes
+  `source`, publication datetime, headline, and body excerpt. If the LLM omits a ticker,
+  the missing news report is completed as a neutral report with corpus evidence instead of
+  causing an all-cash PM API fallback.
 
-**What is NOT built tonight:**
-- Actual corpus population (requires Finnhub API call or download)
-- Full historical 2022-2024 corpus population
-- Any thesis run with news corpus enabled
+**Medium rerun with news enabled (2026-05-29):**
+- Command used `NEWS_CORPUS_ENABLED=true` and
+  `NEWS_CORPUS_DIR=./data/cache/news_corpus_av_2023_01`.
+- Run id: `pm_api_smoke_20260529_132827`.
+- Checks: 19 decisions, 0 `pm_api_error`, 57 `get_news_corpus` tool outputs, no
+  `published_at > t_now` violations, and every non-empty news report evidence item includes
+  a source/date reference.
+- Metrics: AnnReturn +205.5%, Sharpe 4.192, MaxDD 3.9%, PM faithfulness 0.4074,
+  strict PM faithfulness 0.6667, `cost_drag_bps=10.96`, `turnover_pct=109.61`.
 
 **Consequence:** The news path is methodologically locked, implemented, and tested.
 It remains off by default. PM runs continue using `sentiment_unavailable` unless
