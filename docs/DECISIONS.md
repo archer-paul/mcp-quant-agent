@@ -52,14 +52,27 @@ Reasons:
 - Feature flag `news_corpus_enabled: bool = False` in `Settings` — off by default
 - Anti-lookahead test: `published_at > t_now` items MUST NOT reach the analyst
 
+**Implementation update (2026-05-29):**
+- `scripts/build_news_corpus.py` populates `data/cache/news_corpus/<TICKER>.parquet`
+  from Finnhub `/company-news`, with optional Firecrawl enrichment for article body text.
+- `PMBacktestEngine` can read the corpus when `news_corpus_enabled=True`; flag off preserves
+  the existing `sentiment_unavailable` / cache-first path.
+- Firecrawl search support exists, but it is accepted only when a publication-like timestamp
+  is available from page/search metadata. Firecrawl crawl time is never used as `published_at`.
+- Local smoke population succeeded for recent Finnhub data (2026-05-01→2026-05-29,
+  AAPL/MSFT/NVDA) and produced causally readable parquet. The same key returned 0 rows for
+  Jan 2023, so the available Finnhub plan appears to limit historical news access.
+- The local Firecrawl key returned HTTP 401 against `/v2/search`; Firecrawl remains coded and
+  unit-tested, but not populated locally until a valid key is provided.
+
 **What is NOT built tonight:**
 - Actual corpus population (requires Finnhub API call or download)
-- Integration into PM backbone (PM still uses `sentiment_unavailable` path)
-- Any run with news corpus enabled
+- Full historical 2022-2024 corpus population
+- Any thesis run with news corpus enabled
 
-**Consequence:** The news architect path is methodologically locked and tested. It can be
-activated once a corpus is validated. All PM runs continue using `sentiment_unavailable`
-until the corpus passes the anti-lookahead test on real data.
+**Consequence:** The news path is methodologically locked, implemented, and tested.
+It remains off by default. PM runs continue using `sentiment_unavailable` unless
+`news_corpus_enabled=True` is explicitly set and a validated corpus is present.
 
 ---
 
