@@ -1,0 +1,135 @@
+{
+  "single_agent": {
+    "n_events": 2250,
+    "n_api_calls": 1494,
+    "n_cache_hits": 756,
+    "cache_hit_rate": 0.336,
+    "latency_ms_p50": 1197.6,
+    "latency_ms_p95": 7021.7,
+    "wall_clock_seconds": 2987.3,
+    "prompt_tokens": 2475349,
+    "completion_tokens": 136647,
+    "total_tokens": 2611996,
+    "incremental_cost_usd": 1.208775,
+    "by_span_type": {
+      "judge": {
+        "n_events": 1500,
+        "n_api_calls": 744,
+        "n_cache_hits": 756,
+        "prompt_tokens": 571900,
+        "completion_tokens": 29181,
+        "total_tokens": 601081,
+        "incremental_cost_usd": 0.27545,
+        "cache_hit_rate": 0.504,
+        "latency_ms_p50": 0.0,
+        "latency_ms_p95": 1778.4
+      },
+      "single_agent": {
+        "n_events": 750,
+        "n_api_calls": 750,
+        "n_cache_hits": 0,
+        "prompt_tokens": 1903449,
+        "completion_tokens": 107466,
+        "total_tokens": 2010915,
+        "incremental_cost_usd": 0.933325,
+        "cache_hit_rate": 0.0,
+        "latency_ms_p50": 4739.2,
+        "latency_ms_p95": 10539.3
+      }
+    },
+    "decision_latency": {
+      "p50_ms": 4783.8,
+      "p95_ms": 10578.4
+    },
+    "error_rate": 0.0,
+    "decisions_per_minute": 15.064
+  },
+  "pm_multi_agent": {
+    "n_events": 2732,
+    "n_api_calls": 2512,
+    "n_cache_hits": 220,
+    "cache_hit_rate": 0.0805,
+    "latency_ms_p50": 3206.4,
+    "latency_ms_p95": 9208.0,
+    "wall_clock_seconds": 11916.5,
+    "prompt_tokens": 10714679,
+    "completion_tokens": 571509,
+    "total_tokens": 11286188,
+    "incremental_cost_usd": 5.200286,
+    "by_span_type": {
+      "analyst": {
+        "n_events": 748,
+        "n_api_calls": 688,
+        "n_cache_hits": 60,
+        "prompt_tokens": 3105100,
+        "completion_tokens": 298824,
+        "total_tokens": 3403924,
+        "incremental_cost_usd": 1.720158,
+        "cache_hit_rate": 0.0802,
+        "latency_ms_p50": 6191.8,
+        "latency_ms_p95": 12061.7
+      },
+      "debate": {
+        "n_events": 1240,
+        "n_api_calls": 1140,
+        "n_cache_hits": 100,
+        "prompt_tokens": 3992168,
+        "completion_tokens": 163781,
+        "total_tokens": 4155949,
+        "incremental_cost_usd": 1.858917,
+        "cache_hit_rate": 0.0806,
+        "latency_ms_p50": 2859.4,
+        "latency_ms_p95": 6076.9
+      },
+      "portfolio_manager": {
+        "n_events": 248,
+        "n_api_calls": 228,
+        "n_cache_hits": 20,
+        "prompt_tokens": 2077739,
+        "completion_tokens": 28836,
+        "total_tokens": 2106575,
+        "incremental_cost_usd": 0.877233,
+        "cache_hit_rate": 0.0806,
+        "latency_ms_p50": 2734.4,
+        "latency_ms_p95": 8734.5
+      },
+      "research_manager": {
+        "n_events": 248,
+        "n_api_calls": 228,
+        "n_cache_hits": 20,
+        "prompt_tokens": 745209,
+        "completion_tokens": 46216,
+        "total_tokens": 791425,
+        "incremental_cost_usd": 0.372029,
+        "cache_hit_rate": 0.0806,
+        "latency_ms_p50": 3241.5,
+        "latency_ms_p95": 6015.5
+      },
+      "trader": {
+        "n_events": 248,
+        "n_api_calls": 228,
+        "n_cache_hits": 20,
+        "prompt_tokens": 794463,
+        "completion_tokens": 33852,
+        "total_tokens": 828315,
+        "incremental_cost_usd": 0.371948,
+        "cache_hit_rate": 0.0806,
+        "latency_ms_p50": 2652.4,
+        "latency_ms_p95": 5452.6
+      }
+    },
+    "decision_latency": {
+      "p50_ms": 45422.3,
+      "p95_ms": 78453.3
+    },
+    "error_rate": 0.012,
+    "decisions_per_minute": 1.259
+  },
+  "combined": {
+    "api_calls": 4006,
+    "cache_hits": 976,
+    "total_tokens": 13898184,
+    "incremental_cost_usd": 6.409061,
+    "wall_clock_seconds": 14903.8
+  }
+}

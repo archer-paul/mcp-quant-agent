@@ -1,0 +1,32 @@
+[
+  {
+    "label": "Single Agent",
+    "n_decisions_manifest": 750,
+    "n_decisions_jsonl": 750,
+    "n_errors_excluded": 0,
+    "expected_decisions": 750,
+    "expected_non_error_decisions": 750,
+    "n_warmup_excluded": 0,
+    "regime_rows_sum": 750,
+    "mcp_time_machine_pass": true,
+    "mcp_time_machine_violations": 0,
+    "mcp_time_machine_checks": 5992,
+    "pass": true
+  },
+  {
+    "label": "PM Multi-Agent",
+    "n_decisions_manifest": 250,
+    "n_decisions_jsonl": 250,
+    "n_errors_excluded": 3,
+    "expected_decisions": 250,
+    "expected_non_error_decisions": 247,
+    "n_warmup_excluded": 0,
+    "regime_rows_sum": 247,
+    "mcp_time_machine_pass": true,
+    "mcp_time_machine_violations": 0,
+    "mcp_time_machine_checks": 12658,
+    "pass": true,
+    "n_reports": 2223,
+    "expected_reports": 2223
+  }
+]

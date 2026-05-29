@@ -1,0 +1,11 @@
+label,regime,n_decisions,faithfulness,faithfulness_strict,n_scoreable,n_faithful,n_unfaithful,n_constrained,grounding
+Single Agent,overall,750,0.628,0.628,750,471,279,0,0.932
+Single Agent,bear,120,0.9,0.9,120,108,12,0,0.942
+Single Agent,bull,420,0.521,0.521,420,219,201,0,0.925
+Single Agent,high_vol,96,0.594,0.594,96,57,39,0,0.973
+Single Agent,range,114,0.763,0.763,114,87,27,0,0.913
+PM Multi-Agent,overall,250,0.417,0.545,738,308,257,173,1.0
+PM Multi-Agent,bear,68,0.344,0.515,195,67,63,65,1.0
+PM Multi-Agent,bull,83,0.427,0.517,246,105,98,43,0.999
+PM Multi-Agent,high_vol,23,0.476,0.612,63,30,19,14,1.0
+PM Multi-Agent,range,76,0.422,0.505,225,95,93,37,1.0

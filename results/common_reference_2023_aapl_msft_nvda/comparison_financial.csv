@@ -1,0 +1,6 @@
+label,run_id,kind,n_decisions,n_errors_excluded,annualised_return_pct,sharpe,sharpe_ci,max_drawdown_pct,turnover_pct,cost_drag_bps
+Single Agent,gpt-4-1-mini_20260529_172840,single_agent,750,0,44.0,2.791,"[0.861, 4.523]",6.9,569.88,56.99
+PM Multi-Agent,pm_api_smoke_20260529_181859,pm_multi_agent,250,3,49.3,1.842,"[-0.119, 3.643]",18.2,1805.46,180.55
+Baseline: buy_and_hold,baselines_20260529_213816,baseline_equal_weight,n/a,n/a,120.8,2.842,"[0.976, 4.527]",13.3,200.2,20.02
+Baseline: momentum_ts,baselines_20260529_213816,baseline_equal_weight,n/a,n/a,26.9,1.167,"[-0.828, 2.925]",22.1,2066.67,206.67
+Baseline: mean_reversion_bb,baselines_20260529_213816,baseline_equal_weight,n/a,n/a,22.0,2.162,"[0.249, 3.918]",5.6,433.33,43.33
