@@ -2,6 +2,50 @@
 
 ---
 
+### 2026-05-29 - Final bounded PM protocol: Alpha Vantage news + locked price cache
+
+**Context:** The earlier Jan 2023 PM news run was methodologically useful, but its artifact
+reported `get_price_history:cache+api` source warnings and only 19 decisions because the PM
+price prefetch passed an inclusive daily `end_date` directly to yfinance, whose `end` parameter
+is exclusive.  The thesis PM extension needs a citable artifact where the declared window,
+price cache, news corpus, commissions, and audit all agree.
+
+**Decision:**
+- Keep the PM principal run bounded by the existing guardrails: AAPL/MSFT/NVDA,
+  2023-01-03 -> 2023-01-31, `gpt-4.1-mini`, LLM cache on, explicit cost
+  acknowledgement.  A 2-year PM run is not attempted because it would bypass the agreed
+  22-date / 3-ticker safety envelope.
+- Add `PMBacktestEngine(price_offline=True)` and runner flag `--price-offline`.  In this
+  mode an incomplete price cache raises before any API fetch.
+- Treat internal daily `end_date` as inclusive and convert to yfinance's exclusive end by
+  fetching `end_date + 1 day` in price wrappers, PM prefetch, the single-agent engine, and
+  baseline loader.
+- Prewarm the price cache once, then run the PM artifact with `--price-offline`.
+- Keep RL/fine-tuning out of scope; record it as future work using `PMDecisionLog` +
+  `decisions.jsonl` as a possible reward dataset.
+
+**Final bounded PM artifact (`pm_api_smoke_20260529_155400`):**
+- Command: `NEWS_CORPUS_ENABLED=true NEWS_CORPUS_DIR=./data/cache/news_corpus_av_2023_01 python scripts/run_pm_multiday.py --tickers AAPL --tickers MSFT --tickers NVDA --start 2023-01-03 --end 2023-01-31 --acknowledge-cost --label pm-final-alpha-news-locked --price-offline`
+- Decisions: 20 portfolio-level PM decisions; `n_pm_errors=0`.
+- Financial checks: final NAV `106895.01`, AnnReturn `+142.1%`, Sharpe `4.270`
+  on the short validation window, MaxDD `3.6%`, cost drag `8.75 bps`, turnover `87.49%`.
+  The short-window Sharpe is diagnostic only and must not be a headline thesis claim.
+- MCP time-machine audit: pass, `0/965` timestamp violations, source warnings `0`.
+  Source counts include `get_price_history:cache=60` and `get_news_corpus:news_corpus=60`.
+- PM evidence grounding: `1.0000` (`668/668` checkable grounded), coverage `0.9475`
+  (`668/705` evidence items).
+- PM faithfulness: overall `0.4561`, strict `0.8387`, with `26` constrained
+  allocation decisions.
+- Baselines on the same window were written to `results/baselines_20260529_155541.csv`
+  with 10 bps one-way costs, 10-day momentum, and 5-day / 1.5-sigma Bollinger mean reversion.
+
+**Consequence:** The PM/news result is now technically citable as a bounded validation artifact:
+real timestamped news is enabled, prices are cache-locked, commissions are symmetric, and the
+artifact-level MCP audit has no future timestamps or live-source warnings.  It remains a
+bounded bonus architecture result, not a replacement for the frozen two-year single-agent run.
+
+---
+
 ### 2026-05-29 - PM evidence grounding and MCP time-machine audit
 
 **Context:** The PM path uses multiple agents and concise final rationales. Numeric
@@ -26,6 +70,10 @@ not audit whether analyst evidence was grounded in MCP tool outputs.
   `get_portfolio:paper_portfolio=19`.
 - PM evidence grounding: `0.9985` (`650/651` checkable grounded), coverage `0.9574`
   (`651/680` evidence items), 29 qualitative unchecked items, 1 ungrounded news item.
+
+**Superseding locked run:** `pm_api_smoke_20260529_155400` is the PM/news artifact to cite
+when discussing the final bounded PM validation because it runs with `--price-offline` and has
+zero live/cache+api source warnings.
 
 **Consequence:** The thesis can now distinguish three claims cleanly:
 1. no temporal leakage in the completed artifact,
