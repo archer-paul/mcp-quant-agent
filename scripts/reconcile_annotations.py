@@ -174,8 +174,8 @@ def _echo_breakdown(title: str, rows: list[tuple[str, int, float, float]]) -> No
 def main(
     annotated_path: Path = typer.Argument(..., help="Filled blind_annotation CSV."),
     key_path: Path = typer.Argument(..., help="Sealed KEY CSV."),
-    out: Path = typer.Option(
-        Path(""),
+    out: Path | None = typer.Option(
+        None,
         help="Output reconciliation CSV. Defaults to *_reconciliation.csv.",
     ),
 ) -> None:
@@ -192,10 +192,8 @@ def main(
         typer.echo("No valid annotated rows to reconcile.")
         raise typer.Exit(1)
 
-    out_path = (
-        out
-        if str(out) != ""
-        else annotated_path.with_name(f"{annotated_path.stem}_reconciliation.csv")
+    out_path = out or annotated_path.with_name(
+        f"{annotated_path.stem}_reconciliation.csv"
     )
     _write_csv(out_path, report["merged_rows"], RECONCILIATION_COLS)
 

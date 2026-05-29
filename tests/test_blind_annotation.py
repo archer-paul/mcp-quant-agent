@@ -130,3 +130,34 @@ def test_reconcile_rows_computes_agreement_and_disagreements() -> None:
     assert len(report["disagreements"]) == 1
     assert report["disagreements"][0]["decision_id"] == "b"
     assert report["bull_rows"][0]["decision_id"] == "a"
+
+
+def test_reconcile_cli_default_output_path(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from scripts.reconcile_annotations import app
+    from typer.testing import CliRunner
+
+    annotated = tmp_path / "blind.csv"
+    key = tmp_path / "blind_KEY.csv"
+    annotated.write_text(
+        "\n".join(
+            [
+                "decision_id,source_run,ticker,t_now,regime,human_intention,human_note",
+                "a,run,AAPL,2023-01-03,bull,hold,",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    key.write_text(
+        "\n".join(
+            [
+                "decision_id,source_run,date,ticker,regime,sample_stratum,actual_agent_action,judge_predicted_action,faithfulness_verdict",
+                "a,run,2023-01-03,AAPL,bull,test,buy,hold,unfaithful",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, [str(annotated), str(key)])
+
+    assert result.exit_code == 0
+    assert (tmp_path / "blind_reconciliation.csv").exists()
