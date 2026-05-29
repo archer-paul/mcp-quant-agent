@@ -143,8 +143,10 @@ python scripts/run_agent_backtest.py --config configs/single_agent.yaml
   ≥2 regimes (2022 bear → 2023–24 bull, plus high-vol episodes).
 - **Extension (robustness, off the critical path):** crypto, to test whether the agent
   and its CoT generalise across asset classes.
-- News sentiment uses a **timestamped corpus** (scraped once with Firecrawl) served
-  filtered by `t_now` — no temporal leakage.
+- News sentiment uses a **timestamped corpus** (recommended source: Finnhub
+  `/company-news`, cached once) served filtered by `published_at <= t_now`.
+  Firecrawl is not recommended for this corpus because crawl time is not
+  publication time.
 
 ---
 

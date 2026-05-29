@@ -2,6 +2,67 @@
 
 ---
 
+### 2026-05-29 - News integration scaffold: methodology locked before corpus build
+
+**Context:** The news analyst was hallucinating signals from technical data (Bug #1, fixed).
+The correct fix is not just gating on 0-item count; it requires a causally correct news corpus
+with verifiable publication timestamps.  This ADR locks the design before any corpus is built.
+
+**Causal correctness requirements (two risks, not one):**
+1. **Date-of-event vs date-of-publication**: a news story about a quarterly earnings call (event
+   2023-01-20) may be published on 2023-01-19 (pre-announce) or 2023-01-21 (post-release).  Only
+   `published_at` is the observable signal for an agent at time `t_now`.  Using `event_date`
+   instead leaks future information.
+2. **Weight-memory contamination (KellyBench §3.4)**: gpt-4.1-mini was trained on data through
+   early 2025, so it "knows" the approximate outcome of every 2022-2024 news story.  The agent
+   can infer future prices from recalled news even without a corpus.  Mitigation: (a) the test
+   window should include post-cutoff dates where possible; (b) the agent is instructed to follow
+   a rule-based process on tool outputs; (c) this limitation must be documented honestly in the
+   thesis.  A real news corpus does NOT eliminate this risk — it only makes the grounding
+   metric meaningful (numeric claims are verifiable against cited corpus extracts).
+
+**Evidence format requirement:** The news analyst must cite actual corpus extracts (verbatim
+quotes or paraphrases with `source + published_at`) in the `evidence` field so that
+`compute_grounding` can verify them.  Sentiment without cited evidence = hallucination.
+
+**Corpus source evaluated:**
+
+| Source | Timestamp | Coverage | Cost | Verdict |
+|--------|-----------|----------|------|---------|
+| Finnhub `/company-news` | `datetime` = Unix publication timestamp ✓ | Per-ticker, 1-2 years free | Free tier, key available | **Recommended** |
+| GDELT GKG | `DATE` = YYYYMMDDHHMMSS publication ✓ | Global, noisy, indirect tickers | Free | Too noisy for equity analysis |
+| AlphaVantage news | `time_published` = ISO ✓ | Ticker-specific, relevance scores | Rate-limited free | Viable alternative |
+| Firecrawl | Crawl date only, not publication date | Flexible | YC credits | NOT suitable — wrong timestamp |
+
+**Decision: Finnhub cached corpus (disabled by default).**
+Reasons:
+- Finnhub already integrated in `mcp_servers/data/finnhub_source.py`
+- The `get_news_items_cache_first` tool exists and works (used in PM smoke)
+- Its `datetime` field is the Unix publication timestamp (confirmed from API docs)
+- The cache pattern (parquet, filtered at read time) is already implemented for prices
+- Historical corpus for 2022-2024 can be pre-fetched once and cached to parquet
+- NOT used for live scraping — corpus is a static parquet file, filtered by `published_at <= t_now`
+
+**Architecture (plumbing only, not on critical path):**
+- `NewsCorpusCache` in `mcp_servers/data/news_corpus_cache.py` — reads parquet, filters by
+  `published_at <= t_now`, identical pattern to `PriceCache`
+- MCP tool `get_news_corpus(ticker, limit)` returns `[{ticker, published_at, title, body, source, url}]`
+  filtered against the configured simulation clock.
+- Analyst prompt receives ONLY corpus extracts; no other data for the news role
+- Feature flag `news_corpus_enabled: bool = False` in `Settings` — off by default
+- Anti-lookahead test: `published_at > t_now` items MUST NOT reach the analyst
+
+**What is NOT built tonight:**
+- Actual corpus population (requires Finnhub API call or download)
+- Integration into PM backbone (PM still uses `sentiment_unavailable` path)
+- Any run with news corpus enabled
+
+**Consequence:** The news architect path is methodologically locked and tested. It can be
+activated once a corpus is validated. All PM runs continue using `sentiment_unavailable`
+until the corpus passes the anti-lookahead test on real data.
+
+---
+
 ### 2026-05-29 - Medium-scale run: first real eval with transaction costs (10 bps symmetric)
 
 **Context:** The previous bounded runs had no transaction costs (agent paid 0 bps, baselines paid
