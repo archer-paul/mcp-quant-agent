@@ -1,0 +1,98 @@
+\chapter{Discussion}
+\label{ch:discussion}
+
+This chapter interprets the results at the level of pattern and mechanism --- the parts that
+are already understood from the design and the validation runs --- and states the threats to
+validity honestly. The quantitative confirmations are deferred to the filled tables of
+\cref{ch:results}; the qualitative claims here are stable.
+
+\section{What the evaluation is really measuring}
+
+The thesis's contribution is not a profitable agent but a \emph{measurement}. The combination
+of near-perfect grounding with a regime-dependent faithfulness gap is the central qualitative
+result, and it is more informative than either metric alone. High grounding establishes that
+the agent is not hallucinating its inputs: when it cites a moving average or a position
+weight, that number is real. A faithfulness gap on top of high grounding therefore cannot be
+explained away as ``the model made up the numbers''; it is a genuine knowledge--action gap of
+the kind KellyBench~\cite{kellybench2026} predicts --- the agent sees the right evidence,
+cites it correctly, and then acts against it.
+
+\section{The exit-discipline gap}
+
+The dominant mechanism behind unfaithful decisions is a failure to trim positions that have
+grown past the cap, concentrated in the strongest-trending names and in the bull regime
+(\cref{tab:nontrim}). This is a specific, interpretable behaviour rather than a diffuse failure,
+and its diagnosis is itself a methodological result. It emerged only because the faithfulness
+judge was made policy-aware: the naive judge silently reclassified these decisions as
+``constrained,'' hiding the gap entirely. The lesson generalises beyond this project: a metric
+that bakes in the wrong assumption about the agent's policy can mask exactly the behaviour it
+is meant to surface, and the discipline of \emph{pre-registering} the policy-aware metric
+before computing it is what makes the resulting finding credible rather than a post-hoc story.
+
+The behaviour also exposed a prompt ambiguity worth naming. The original sizing instructions
+constrained entry but were less explicit about trimming an appreciated position; the imperative
+that a position ``must not exceed'' the cap could be read either as an ongoing maintenance rule
+or as an entry-only constraint. The common-reference run resolves that ambiguity operationally:
+the system prompt now states that positions above $20\%$ \nav\ must be trimmed. This makes any
+remaining non-trim gap easier to interpret as behaviour rather than instruction ambiguity.
+
+\section{Single-agent versus multi-agent}
+
+Following AMA~\cite{ama2025}, the multi-agent Portfolio Manager is evaluated for behavioural
+change rather than assumed superiority. The common-reference run shows the conservative
+outcome: explicit deliberation generalises the causal, grounded evaluation harness to a richer
+architecture, but it does not automatically produce a statistically reliable performance edge
+or close every action-consistency gap. This strengthens the thesis's evaluation-first stance:
+more architecture is not automatically more capability, and the harness is valuable precisely
+because it can show that clearly.
+
+\section{Limitations and threats to validity}
+\label{sec:limitations}
+
+We state limitations plainly; for a thesis built on rigour, candour about what the design does
+\emph{not} establish is part of the contribution.
+
+\paragraph{Weight-memory contamination.} The most serious threat is unremovable by any data
+filter: the model's parameters encode the approximate outcome of the historical test period
+(\cref{sec:leakage}). The \tnow\ filter prevents \emph{data} leakage but not \emph{parametric}
+recall. We mitigate by instructing a rule-based process over tools and, where feasible,
+pushing the window toward the training cutoff, but we do not claim to eliminate it. A real news
+corpus does not solve this; it only makes grounding meaningful. This caps the strength of any
+claim that the agent's reasoning generalises to genuinely unseen periods.
+
+\paragraph{Single market window and asset class.} The primary study is US equities over one
+multi-regime window. The regime labels are causal and the segmentation is principled, but four
+regime buckets in one window are not a substitute for multiple independent periods. Cross-asset
+and out-of-period generalisation are future work, not claims of this thesis.
+
+\paragraph{Bootstrap assumptions.} The confidence intervals use an i.i.d.\ bootstrap; the
+stationary bootstrap of Politis and Romano~\cite{politis1994} would better respect return
+autocorrelation, and our intervals may be mildly optimistic for momentum-laden strategies
+(\cref{sec:bootstrap}). We report this rather than hide it.
+
+\paragraph{LLM-judge dependence of faithfulness.} Faithfulness rests on a judge that is itself
+an LLM. We mitigate with a blind protocol, temperature-zero determinism, pre-registration, and
+human anchoring (\cref{sec:anchor}), but the metric is ultimately a model-mediated estimate of
+a counterfactual, and the residual judge weakness around the entry threshold is documented.
+
+\paragraph{Unadjusted prices.} Avoiding split-adjustment leakage costs us split-corrected
+long-horizon comparisons (\cref{sec:leakage}). This is the right trade-off for a look-ahead
+study but does slightly distort multi-year return arithmetic.
+
+\paragraph{Annualisation and short windows.} Validation-window performance is never
+annualised, by design; any short-window Sharpe is statistically meaningless and is excluded
+from all claims.
+
+\section{Future work}
+\label{sec:future}
+
+Three extensions are identified and deliberately left out of scope to protect the evaluation.
+First, a \emph{quant-researcher} agent that reads the literature and registers custom
+indicators into the analytics server, extending the agent's own toolbox --- an original angle
+relative to TradingAgents, but a scope risk that must be sandboxed and validated before any
+generated code is executed. Second, \emph{reinforcement-learning fine-tuning} using the
+decision and realised-return logs as a reward signal, contingent on a strictly held-out
+out-of-sample period to detect overfitting. Third, the methodological upgrades already flagged:
+an HMM regime model (causally fitted), the stationary bootstrap, and a cross-provider backbone
+comparison in the spirit of~\cite{ama2025}. Each is valuable; none is a prerequisite for the
+thesis's contribution, and each is recorded so that a successor can pick it up cleanly.

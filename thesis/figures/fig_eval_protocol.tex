@@ -1,0 +1,51 @@
+% ---------------------------------------------------------------------
+% Figure: evaluation protocol. A logged decision fans out to three
+% measurements: faithfulness (blind LLM judge), grounding (deterministic),
+% and the human anchor that validates the judge.
+% ---------------------------------------------------------------------
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}[
+      >=Stealth, font=\footnotesize, node distance=12mm,
+      rec/.style={draw, rounded corners, align=center, minimum height=12mm,
+                  minimum width=30mm, thick, fill=gray!8},
+      m/.style={draw, rounded corners, align=center, minimum height=12mm,
+                minimum width=34mm, thick},
+      judge/.style={m, fill=accent!8, draw=accent!55},
+      det/.style={m, fill=accent!8, draw=accent!55},
+      hum/.style={m, fill=todored!8, draw=todored!55},
+    ]
+    \node[rec] (dec) {Logged decision\\\scriptsize evidence + \CoT\\\scriptsize + executed order};
+
+    \node[judge, above right=8mm and 26mm of dec] (faith)
+      {\textbf{Faithfulness}\\\scriptsize blind judge predicts\\\scriptsize rational action (temp 0)};
+    \node[det, below right=8mm and 26mm of dec] (ground)
+      {\textbf{Grounding}\\\scriptsize numeric claims vs\\\scriptsize actual tool outputs ($\pm1\%$)};
+
+    \node[hum, right=22mm of faith] (human)
+      {\textbf{Human anchor}\\\scriptsize blind annotation\\\scriptsize Cohen's $\kappa$};
+
+    % what the judge sees vs what the agent did
+    \draw[->, thick] (dec.east) -- ++(8mm,0) |- (faith.west)
+      node[pos=0.75, above, font=\scriptsize]{evidence only};
+    \draw[->, thick] (dec.east) -- ++(8mm,0) |- (ground.west)
+      node[pos=0.75, below, font=\scriptsize]{\CoT\ + outputs};
+    \draw[->, thick, dashed, todored!70] (faith) -- (human)
+      node[midway, above, font=\scriptsize]{calibrate};
+
+    \node[align=center, below=7mm of ground, text width=80mm, font=\scriptsize\itshape,
+          text=gray]
+      {compare judge prediction to the agent's \emph{executed} action $\Rightarrow$
+       faithful / constrained / unfaithful, then segment every metric by market regime};
+  \end{tikzpicture}
+  \caption[Reasoning-evaluation protocol]{The reasoning-evaluation protocol. Each logged
+  decision is measured along two automatic axes. \emph{Faithfulness} asks whether the
+  executed trade matches the action a rational, policy-aware judge would take given
+  \emph{only} the same objective evidence (regime, indicators, portfolio) --- deliberately
+  withholding the agent's own rationale and action so the judge cannot simply echo them.
+  \emph{Grounding} is deterministic: it extracts numeric claims from the chain-of-thought
+  and checks each against the actual tool outputs within a $1\%$ tolerance. The judge is in
+  turn anchored to blind human annotation (Cohen's $\kappa$), making the human agreement the
+  validity cornerstone of the whole protocol. Every metric is finally segmented by regime.}
+  \label{fig:evalprotocol}
+\end{figure}

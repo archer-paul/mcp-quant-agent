@@ -2,6 +2,83 @@
 
 ---
 
+### 2026-05-29 - One-year common-reference run: costed single-agent vs PM vs baselines
+
+**Context:** Drafting surfaced two comparison defects.  First, the older two-year
+single-agent run predates symmetric transaction costs, so agent returns were gross while
+baselines paid 10 bps one-way.  Second, the PM had only a one-month validation artifact.
+The thesis needs one clean benchmark where single-agent, PM, and baselines share window,
+tickers, warm-up, and costs.
+
+**Decision:**
+- Use `2023-01-03 -> 2023-12-29` as the one-year common-reference decision window.
+  It gives 250 actual cached trading days for AAPL/MSFT/NVDA and crosses bear, bull,
+  high-volatility, and range labels under the causal v2 regime detector.
+- Use three tickers (`AAPL`, `MSFT`, `NVDA`) rather than five to stay under the agreed
+  cost/time budget while still covering large-cap technology and a strong 2023 trend case.
+- Prefetch prices from `2021-11-09` (decision start minus
+  `REGIME_WARMUP_CALENDAR_DAYS=420`) and run both paths with `--price-offline`.
+  Preflight confirmed `n_warmup_excluded=0` for both single-agent and PM.
+- Enable the Alpha Vantage 2023 timestamped news corpus for both paths:
+  `data/cache/news_corpus_av_2023_full` with AAPL=575, MSFT=954, NVDA=517 raw
+  articles.  The corpus stores raw rows, including 2023-12-30 articles, but read-time
+  filtering excludes them at `t_now=2023-12-29`.
+- Charge `transaction_cost_bps=10` everywhere: single-agent portfolio, PM portfolio, and
+  baselines.  Report `cost_drag_bps` and `turnover_pct` for every financial row.
+- Keep PM errors explicit and exclude `is_error` decisions from reasoning tables.  The
+  common PM run has 3/250 explicit `pm_api_error` rows; these are reported as system
+  reliability observations, not silently hidden.
+- Add local `llm_usage.jsonl` telemetry because Langfuse OTLP export is best-effort and
+  timed out during the long run.  The local log records cache hits, prompt/completion
+  tokens, incremental cost, API calls, latency, and span type.
+
+**Common-reference artifacts:**
+- Single-agent run: `gpt-4-1-mini_20260529_172840`
+  (`runs/.../decisions.jsonl`, `results/.../bounded_eval_manifest.json`).
+- PM run: `pm_api_smoke_20260529_181859`
+  (`runs/.../decisions.jsonl`, `results/.../pm_multiday_manifest.json`).
+- Baselines: `results/baselines_20260529_213816.csv`.
+- Unified tables: `results/common_reference_2023_aapl_msft_nvda/`.
+- Thesis macros updated in `thesis/results/numbers.tex`.
+
+**Key checks:**
+- Single-agent: 750 decisions, 0 errors, MCP audit `0/5992`, warm-up excluded `0`.
+- PM: 250 decisions, 3 errors excluded from reasoning tables, MCP audit `0/12658`,
+  warm-up excluded `0`, reports arithmetic `2223/2223`.
+- Unified MCP audit: `0/18650` timestamp violations.
+- Actual local LLM telemetry: 13,898,184 tokens, 4,006 API calls, 976 cache hits,
+  `$6.4091` incremental model spend, 248.4 minutes combined wall-clock proxy.
+
+**Consequence:** The thesis now has a clean, cost-symmetric, same-window reference table.
+The older two-year run remains useful for the primary reasoning diagnosis, but not as the
+like-for-like financial comparison.  The PM Sharpe CI on the common run still crosses zero,
+so PM remains an architecture extension rather than a performance headline.
+
+---
+
+### 2026-05-29 - Single-agent hard-cap maintenance prompt
+
+**Context:** The dominant faithfulness gap was non-trimming: positions grew beyond the
+20% NAV cap and the judge said to sell/trim while the agent held, especially in bullish
+conditions.  The old prompt made the 20% cap clear for new buys but left ambiguity about
+whether an appreciated position must be actively trimmed.
+
+**Decision:** Update the single-agent system prompt before the common-reference run:
+- If `current_position_value > 0.20 * NAV`, the agent must sell enough shares to restore
+  exposure to `<=20%` NAV, even if signals are otherwise positive.
+- The user prompt now includes `pct_of_nav` for positions, so the model does not need to
+  infer exposure from raw quantity, price, and NAV.
+- The prompt no longer asks for chain-of-thought outside JSON; all reasoning must stay in
+  the bounded `rationale` field.
+
+**Consequence:** The common-reference run is intentionally "cost-and-constraint-correct";
+it is not prompt-identical to the older two-year run.  This is acceptable because the new
+run exists precisely to fix the drafting incoherence.  Tests in
+`tests/test_single_agent_prompt.py` pin the trim instruction and `pct_of_nav` exposure
+context.
+
+---
+
 ### 2026-05-29 - Final bounded PM protocol: Alpha Vantage news + locked price cache
 
 **Context:** The earlier Jan 2023 PM news run was methodologically useful, but its artifact

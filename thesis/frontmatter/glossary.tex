@@ -1,0 +1,33 @@
+% ---- Glossary of acronyms ------------------------------------------
+% Implemented as a plain longtable to avoid an extra makeglossaries
+% compilation pass (keeps the build to pdflatex -> biber -> pdflatex x2).
+\chapter*{Glossary of Acronyms}
+\addcontentsline{toc}{chapter}{Glossary of Acronyms}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+\textbf{Acronym} & \textbf{Expansion} \\
+\midrule
+ADR    & Architectural Decision Record (the \file{docs/DECISIONS.md} log) \\
+B\&H   & Buy-and-Hold (passive benchmark strategy) \\
+CI     & Confidence Interval \\
+\CoT   & Chain-of-Thought (the model's stated step-by-step reasoning) \\
+CSV    & Comma-Separated Values \\
+DD     & Drawdown \\
+LLM    & Large Language Model \\
+\mcp   & Model Context Protocol \\
+\nav   & Net Asset Value (total portfolio value, cash plus positions) \\
+OHLCV  & Open/High/Low/Close/Volume (a price bar) \\
+OTLP   & OpenTelemetry Protocol (trace export transport) \\
+PM     & Portfolio Manager (the multi-agent allocator) \\
+PnL    & Profit and Loss \\
+RL     & Reinforcement Learning \\
+RSI    & Relative Strength Index (a technical indicator) \\
+SDK    & Software Development Kit \\
+SMA    & Simple Moving Average \\
+TDD    & Test-Driven Development \\
+\tnow  & The simulation clock's current time; the look-ahead boundary \\
+\bottomrule
+\end{tabularx}
+\end{center}

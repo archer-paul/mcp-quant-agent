@@ -1,0 +1,46 @@
+% ---------------------------------------------------------------------
+% Figure: the perceive -> reason -> act -> observe loop with the
+% simulation clock t_now at the centre, gating every tool read.
+% ---------------------------------------------------------------------
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}[
+      >=Stealth, node distance=20mm,
+      stage/.style={draw, rounded corners, align=center, minimum width=26mm,
+                    minimum height=11mm, fill=accent!8, draw=accent!60, thick},
+      clk/.style={draw, circle, align=center, minimum size=20mm, fill=todored!8,
+                  draw=todored!60, very thick},
+      lbl/.style={font=\footnotesize\itshape, text=gray}
+    ]
+    \node[clk] (clock) {\textbf{\tnow}\\\scriptsize clock};
+
+    \node[stage, above=18mm of clock]            (perceive) {\textbf{Perceive}\\\scriptsize read \mcp\ tools};
+    \node[stage, right=24mm of clock]            (reason)   {\textbf{Reason}\\\scriptsize \CoT\ over outputs};
+    \node[stage, below=18mm of clock]            (act)      {\textbf{Act}\\\scriptsize place\_order};
+    \node[stage, left=24mm of clock]             (observe)  {\textbf{Observe}\\\scriptsize fills, \nav, PnL};
+
+    % outer cycle
+    \draw[->, thick] (perceive) to[bend left=18] (reason);
+    \draw[->, thick] (reason)   to[bend left=18] (act);
+    \draw[->, thick] (act)      to[bend left=18] (observe);
+    \draw[->, thick] (observe)  to[bend left=18] (perceive);
+
+    % every tool read consults the clock
+    \draw[->, dashed, todored!70] (clock) -- (perceive) node[midway, lbl, right]{gate};
+    \draw[->, dashed, todored!70] (clock) -- (act);
+    \draw[->, dashed, todored!70] (clock) -- (reason);
+    \draw[->, dashed, todored!70] (clock) -- (observe);
+
+    \node[lbl, below=2mm of act, text width=58mm, align=center]
+      {after the loop closes, the engine calls \code{clock.advance\_to($t{+}1$)};
+       it never moves backward};
+  \end{tikzpicture}
+  \caption[The clock-centred agent loop]{The \mbox{perceive\,$\rightarrow$\,reason\,$\rightarrow$\,act\,$\rightarrow$\,observe}
+  loop executed once per bar per ticker. The simulation clock \tnow\ sits at the centre:
+  every data read (dashed arrows) is gated by it, so the agent can never perceive a
+  datapoint dated after \tnow. The same loop runs in backtest and in live operation; only
+  the clock's advance source differs (event loop versus wall clock). After the loop closes,
+  the engine advances the clock strictly forward, which is the only mutation that exposes
+  new data.}
+  \label{fig:loop}
+\end{figure}

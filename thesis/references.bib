@@ -1,0 +1,177 @@
+% =====================================================================
+% references.bib
+% Pull canonical BibTeX from the arXiv abstract pages and CROSS-CHECK
+% every numeric claim against the PDF before citing (papers/README.md).
+% arXiv identifiers marked "verify" must be confirmed before submission.
+% =====================================================================
+
+% ---- Evaluation methodology backbone --------------------------------
+@misc{kellybench2026,
+  title        = {KellyBench: Evaluating Long-Horizon Sequential Decision-Making of Large Language Models},
+  author       = {Gradi and others},
+  year         = {2026},
+  eprint       = {2604.27865},
+  archivePrefix= {arXiv},
+  primaryClass = {cs.LG},
+  note         = {arXiv:2604.27865 --- verify authors/title against PDF before submission}
+}
+
+@misc{stockbench2025,
+  title        = {StockBench: A Contamination-Free Benchmark for LLM Trading Agents},
+  author       = {Chen and others},
+  year         = {2025},
+  eprint       = {2510.02209},
+  archivePrefix= {arXiv},
+  primaryClass = {q-fin.TR},
+  note         = {arXiv:2510.02209 --- verify authors/title against PDF}
+}
+
+@misc{livetradebench2025,
+  title        = {LiveTradeBench: A Real-Time Benchmark for Trading Agents},
+  author       = {Yu and others},
+  year         = {2025},
+  archivePrefix= {arXiv},
+  primaryClass = {q-fin.TR},
+  note         = {arXiv identifier to verify (papers/README.md lists 2511.xxxxx)}
+}
+
+% ---- Multi-agent architecture references ----------------------------
+@misc{tradingagents2024,
+  title        = {TradingAgents: Multi-Agent LLM Financial Trading Framework},
+  author       = {Xiao and others},
+  year         = {2024},
+  eprint       = {2412.20138},
+  archivePrefix= {arXiv},
+  primaryClass = {q-fin.TR},
+  note         = {repo: github.com/TauricResearch/TradingAgents; v7 on arXiv}
+}
+
+@misc{ama2025,
+  title        = {Agent Market Arena: Comparing LLM Trading Agent Architectures},
+  author       = {Qian and others},
+  year         = {2025},
+  eprint       = {2510.11695},
+  archivePrefix= {arXiv},
+  primaryClass = {q-fin.TR}
+}
+
+@misc{atlas2025,
+  title        = {{ATLAS}: Adaptive Trading via Dynamic Prompt Optimisation and Multi-Agent Coordination},
+  author       = {Papadakis and others},
+  year         = {2025},
+  eprint       = {2510.15949},
+  archivePrefix= {arXiv},
+  primaryClass = {q-fin.TR}
+}
+
+@misc{hedgeagents2025,
+  title        = {HedgeAgents: A Balanced-Aware Multi-Agent Financial Trading System},
+  author       = {Li and others},
+  year         = {2025},
+  eprint       = {2502.13165},
+  archivePrefix= {arXiv},
+  primaryClass = {q-fin.TR},
+  note         = {WWW '25}
+}
+
+@misc{fincon2024,
+  title        = {{FinCon}: A Synthesized LLM Multi-Agent System with Conceptual Verbal Reinforcement for Financial Decision Making},
+  author       = {Yu and others},
+  year         = {2024},
+  archivePrefix= {arXiv},
+  primaryClass = {q-fin.TR},
+  note         = {arXiv identifier to verify}
+}
+
+% ---- Foundational statistics / finance ------------------------------
+@article{kelly1956,
+  title   = {A New Interpretation of Information Rate},
+  author  = {Kelly, J. L.},
+  journal = {Bell System Technical Journal},
+  volume  = {35},
+  number  = {4},
+  pages   = {917--926},
+  year    = {1956}
+}
+
+@article{politis1994,
+  title   = {The Stationary Bootstrap},
+  author  = {Politis, Dimitris N. and Romano, Joseph P.},
+  journal = {Journal of the American Statistical Association},
+  volume  = {89},
+  number  = {428},
+  pages   = {1303--1313},
+  year    = {1994}
+}
+
+@book{glasserman2003,
+  title     = {Monte Carlo Methods in Financial Engineering},
+  author    = {Glasserman, Paul},
+  year      = {2003},
+  publisher = {Springer},
+  series    = {Stochastic Modelling and Applied Probability}
+}
+
+@article{sharpe1994,
+  title   = {The Sharpe Ratio},
+  author  = {Sharpe, William F.},
+  journal = {Journal of Portfolio Management},
+  volume  = {21},
+  number  = {1},
+  pages   = {49--58},
+  year    = {1994}
+}
+
+@article{sortino1994,
+  title   = {Performance Measurement in a Downside Risk Framework},
+  author  = {Sortino, Frank A. and Price, Lee N.},
+  journal = {Journal of Investing},
+  volume  = {3},
+  number  = {3},
+  pages   = {59--64},
+  year    = {1994}
+}
+
+@article{cohen1960,
+  title   = {A Coefficient of Agreement for Nominal Scales},
+  author  = {Cohen, Jacob},
+  journal = {Educational and Psychological Measurement},
+  volume  = {20},
+  number  = {1},
+  pages   = {37--46},
+  year    = {1960}
+}
+
+% ---- Faithfulness of chain-of-thought reasoning ---------------------
+@misc{turpin2023faithfulness,
+  title        = {Language Models Don't Always Say What They Think: Unfaithful Explanations in Chain-of-Thought Prompting},
+  author       = {Turpin, Miles and Michael, Julian and Perez, Ethan and Bowman, Samuel R.},
+  year         = {2023},
+  eprint       = {2305.04388},
+  archivePrefix= {arXiv},
+  primaryClass = {cs.CL},
+  note         = {arXiv:2305.04388 --- verify before citing}
+}
+
+% ---- Tooling / protocol ---------------------------------------------
+@misc{mcp2024,
+  title        = {Model Context Protocol},
+  author       = {{Anthropic}},
+  year         = {2024},
+  howpublished = {\url{https://modelcontextprotocol.io}},
+  note         = {Specification; accessed for this thesis}
+}
+
+@misc{langgraph2024,
+  title        = {LangGraph: Stateful Multi-Actor Applications with LLMs},
+  author       = {{LangChain}},
+  year         = {2024},
+  howpublished = {\url{https://langchain-ai.github.io/langgraph/}}
+}
+
+@misc{langfuse2024,
+  title        = {Langfuse: Open-Source LLM Engineering Platform},
+  author       = {{Langfuse}},
+  year         = {2024},
+  howpublished = {\url{https://langfuse.com}}
+}

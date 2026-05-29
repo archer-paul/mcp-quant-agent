@@ -1,0 +1,123 @@
+% =====================================================================
+% preamble.tex — packages, macros, and document-wide settings
+% Loaded by main.tex. Keep package load order stable: hyperref then
+% cleveref must be loaded LAST (cleveref after hyperref after amsmath).
+% =====================================================================
+
+% ---- Page geometry --------------------------------------------------
+\usepackage[a4paper,inner=3.2cm,outer=2.6cm,top=2.8cm,bottom=2.8cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% ---- Fonts / micro-typography --------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% ---- Maths ----------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+
+% ---- Tables / figures ----------------------------------------------
+\usepackage{booktabs}        % professional rules; never use vertical \hline
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{makecell}
+\usepackage{siunitx}         % numeric column alignment
+\sisetup{
+  detect-all,
+  table-number-alignment = center,
+  round-mode = places,
+  round-precision = 3,
+  group-digits = false
+}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\captionsetup{font=small,labelfont=bf}
+
+% ---- TikZ / diagrams ------------------------------------------------
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric,fit,backgrounds,
+                shapes.misc,decorations.pathreplacing,patterns}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+% ---- Code / verbatim ------------------------------------------------
+\usepackage{listings}
+\usepackage{xcolor}
+\definecolor{codebg}{RGB}{246,247,249}
+\definecolor{codekw}{RGB}{0,90,160}
+\definecolor{codecm}{RGB}{120,120,120}
+\definecolor{accent}{RGB}{0,90,160}
+\definecolor{todored}{RGB}{176,0,32}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm}\itshape,
+  stringstyle=\color{accent},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{gray!40},
+  columns=fullflexible,
+  language=Python,
+  numbers=none
+}
+
+% ---- Bibliography (biblatex + biber) --------------------------------
+\usepackage[backend=biber,style=numeric-comp,sorting=nyt,maxbibnames=8,giveninits=true]{biblatex}
+\addbibresource{references.bib}
+
+% ---- Hyperref + cleveref (MUST be near the end) ---------------------
+\usepackage[hidelinks,breaklinks=true]{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent,
+  citecolor=accent,
+  urlcolor=accent,
+  pdftitle={Autonomous Trading Agents via the Model Context Protocol},
+  pdfauthor={Paul Archer}
+}
+\usepackage[capitalise,nameinlink]{cleveref}
+% Teach cleveref the names of the custom theorem-like environments.
+\crefname{invariant}{Invariant}{Invariants}
+\Crefname{invariant}{Invariant}{Invariants}
+\crefname{designdecision}{Design Decision}{Design Decisions}
+\Crefname{designdecision}{Design Decision}{Design Decisions}
+
+% =====================================================================
+% Project-specific macros
+% =====================================================================
+
+% ---- Result-number placeholder. Every not-yet-final number must use a
+%      macro defined in results/numbers.tex, which expands to \TODO until
+%      the full run lands. \TODO renders as a visible red flag in the PDF
+%      so no placeholder can slip into the final document unnoticed.
+\newcommand{\TODO}[1]{{\color{todored}\textbf{[TODO: #1]}}}
+
+% ---- Inline shorthands ---------------------------------------------
+\newcommand{\tnow}{\ensuremath{t_{\text{now}}}}
+\newcommand{\mcp}{\textsc{mcp}}
+\newcommand{\CoT}{\textsc{CoT}}
+\newcommand{\nav}{\textsc{nav}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\file}[1]{\texttt{\small #1}}
+
+% ---- Theorem-like environments for design invariants ---------------
+\usepackage{amsthm}
+\newtheorem{invariant}{Invariant}
+\newtheorem{designdecision}{Design Decision}
+
+% ---- A boxed "preliminary / not thesis-final" warning for example
+%      figures and tables drawn from medium-scale validation runs.
+\usepackage[most]{tcolorbox}
+\newtcolorbox{prelim}{
+  colback=todored!4, colframe=todored!55, boxrule=0.6pt, arc=2pt,
+  left=6pt,right=6pt,top=4pt,bottom=4pt,
+  fonttitle=\bfseries, title={Preliminary --- medium-scale validation only, not thesis-final}
+}

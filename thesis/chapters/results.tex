@@ -1,0 +1,370 @@
+\chapter{Results}
+\label{ch:results}
+
+\begin{quote}\small\itshape
+A note on status and provenance. All result numbers are centralised as macros in
+\file{results/numbers.tex}; the chapter sources cite macros only. The two-year single-agent
+run \runId\ remains the primary reasoning artifact. The like-for-like performance comparison
+is now the \commonRunLabel: \commonStart\ to \commonEnd, \commonUniverse, symmetric
+$10$\,bps one-way costs, cache-locked prices, timestamped news enabled, and the same decision
+window for the single agent and the multi-agent Portfolio Manager.
+\end{quote}
+
+\section{Experimental setup}
+\label{sec:setup}
+
+The canonical single-agent run is \runId, over \studyStart\ to \studyEnd\ on the universe
+\universeList, producing \nDecisions\ decisions with \nParseErrors\ parse errors. It is used
+for the primary regime-segmented reasoning diagnosis because it spans the broader period. The
+clean financial comparison is separate and explicitly labelled: \commonRunLabel,
+\commonStart\ to \commonEnd, \commonUniverse, \commonNTradingDays\ trading days,
+\commonSingleDecisions\ single-agent decisions and \commonPmDecisions\ PM decisions.
+
+This common-reference run resolves the two comparability problems found during drafting. First,
+the single agent, PM, and baselines all pay the same $10$\,bps one-way transaction cost and all
+report turnover and cost drag. Second, the PM is no longer only a one-month validation: it is
+run over the same one-year decision window and ticker set as the single agent. Prices are served
+from a prewarmed cache covering the decision window plus the 420-calendar-day regime warm-up;
+both paths have zero warm-up exclusions. Confidence intervals use an i.i.d.\ bootstrap of daily
+returns with \bootstrapResamples\ resamples (\cref{sec:bootstrap}). PM decisions with
+\code{is\_error} are excluded from reasoning tables and counted separately.
+
+\section{Financial performance}
+\label{sec:resultsfin}
+
+\Cref{tab:commonfinancial} is the unified comparison table. It is the only table in this thesis
+that should be read as a direct single-agent versus PM versus baseline comparison.
+
+\begin{table}[t]
+  \centering
+  \caption[One-year common-reference comparison]{\commonRunLabel\ over \commonStart\ to
+  \commonEnd\ on \commonUniverse. All rows use the same decision window, the same tickers, and
+  symmetric $10$\,bps one-way costs. PM performance is reported but not headlined because its
+  Sharpe confidence interval crosses zero.}
+  \label{tab:commonfinancial}
+  \scriptsize
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{l S S c S S S}
+    \toprule
+    Strategy & {Ann. ret. (\%)} & {Sharpe} & {Sharpe $95\%$ CI}
+             & {MaxDD (\%)} & {Turnover (\%)} & {Cost drag (bps)} \\
+    \midrule
+    Single agent & \commonSingleAnnReturn & \commonSingleSharpe & \commonSingleSharpeCI
+      & \commonSingleMaxDD & \commonSingleTurnover & \commonSingleCostDrag \\
+    PM multi-agent & \commonPmAnnReturn & \commonPmSharpe & \commonPmSharpeCI
+      & \commonPmMaxDD & \commonPmTurnover & \commonPmCostDrag \\
+    Eq.-wt B\&H & \commonBhAnnReturn & \commonBhSharpe & \commonBhSharpeCI
+      & \commonBhMaxDD & \commonBhTurnover & \commonBhCostDrag \\
+    Momentum & \commonMomAnnReturn & \commonMomSharpe & \commonMomSharpeCI
+      & \commonMomMaxDD & \commonMomTurnover & \commonMomCostDrag \\
+    Mean-rev & \commonMrAnnReturn & \commonMrSharpe & \commonMrSharpeCI
+      & \commonMrMaxDD & \commonMrTurnover & \commonMrCostDrag \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+The single agent produces a positive, statistically non-zero Sharpe on this costed one-year
+window (\commonSingleSharpeCI), but it does not beat equal-weight Buy-\&-Hold on return or
+Sharpe. The PM's point return is higher than the single agent's, but its drawdown and turnover
+are much larger and the Sharpe interval \commonPmSharpeCI\ crosses zero; it is therefore
+reported as an architecture extension, not as a track record. This is the intended reading:
+the primary thesis claim is not superior trading performance, but a clean harness that exposes
+reasoning, grounding, costs, and temporal leakage on the same artifact.
+
+\Cref{tab:financial} reports the older two-year single-agent context against the three
+baselines. It is retained for the reasoning narrative, not as the clean cost-symmetric
+comparison.
+
+\begin{table}[t]
+  \centering
+  \caption[Two-year single-agent context]{Historical two-year single-agent context over
+  \studyStart\ to \studyEnd. This table supports the reasoning diagnosis over a broader
+  regime mix. The direct cost-symmetric comparison is \cref{tab:commonfinancial}.}
+  \label{tab:financial}
+  \begin{tabular}{l S S S S}
+    \toprule
+    Metric & {Agent} & {Eq.-wt B\&H} & {Momentum} & {Mean-rev} \\
+    \midrule
+    Annualised return (\%) & \agentAnnReturn & \bhAnnReturn & \momAnnReturn & \mrAnnReturn \\
+    Sharpe                 & \agentSharpe   & \bhSharpe    & \momSharpe    & \mrSharpe \\
+    Sharpe $95\%$ CI       & \multicolumn{1}{c}{\agentSharpeCI} & {--} & {--} & {--} \\
+    Sortino                & \agentSortino  & {--} & {--} & {--} \\
+    Calmar                 & \agentCalmar   & {--} & {--} & {--} \\
+    Max drawdown (\%)      & \agentMaxDD    & {--} & {--} & {--} \\
+    Hit rate (\%)          & \agentHitRate  & {--} & {--} & {--} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+In the older two-year context, the agent nearly matches equal-weight Buy-\&-Hold on raw annualised return
+(\agentAnnReturn\,\% versus \bhAnnReturn\,\%) while edging it on the Sharpe ratio
+(\agentSharpe\ versus \bhSharpe) at a contained maximum drawdown of \agentMaxDD\,\%, and it
+clears the systematic momentum and mean-reversion baselines on both return and Sharpe. The
+reading is that the agent earns its keep through \emph{risk control} rather than raw return
+generation, consistent with a disciplined, policy-capped sizing strategy --- though the
+agent's Sharpe confidence interval \agentSharpeCI\ overlaps the Buy-\&-Hold point estimate, so
+the edge is not statistically separated on a single run.
+
+\section{Regime composition of the canonical run}
+\label{sec:resultsregime}
+
+Per-regime risk-adjusted decompositions of the equity curve were not computed for the canonical
+run (the run records aggregate financial metrics and per-decision regime labels, not per-regime
+return series); a regime-resolved equity attribution is noted as follow-up in
+\cref{sec:future}. The thesis's regime-resolved analysis is therefore carried by the
+\emph{reasoning} metrics (\cref{sec:resultsreasoning}), which are segmented per decision.
+\Cref{tab:regimecomp} gives the regime composition that those segmented tables draw on, so the
+per-regime sample sizes can be read with appropriate caution.
+
+\begin{table}[t]
+  \centering
+  \caption[Regime composition of the canonical run]{Regime composition of the canonical
+  single-agent run under the causal labels of \cref{sec:regime}. The bull regime dominates the
+  two-year window, with substantial bear and high-volatility minorities --- the spread that
+  makes regime-segmented reasoning evaluation meaningful. The action mix
+  (\actBuy\ buys, \actSell\ sells, \actHold\ holds) foreshadows the central finding: trading is
+  overwhelmingly holds, and the rare sells are where the exit-discipline gap appears.}
+  \label{tab:regimecomp}
+  \begin{tabular}{l S[round-precision=0] S[round-precision=1]}
+    \toprule
+    Regime & {$n$ decisions} & {\% of run} \\
+    \midrule
+    Bear           & \nBear    & \pctBear \\
+    Bull           & \nBull    & \pctBull \\
+    High volatility& \nHighVol & \pctHighVol \\
+    Range          & \nRange   & \pctRange \\
+    \midrule
+    Total          & \nDecisions & {100.0} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Reasoning quality}
+\label{sec:resultsreasoning}
+
+\subsection{Grounding}
+
+\begin{table}[t]
+  \centering
+  \caption[Grounding by regime]{Grounding of numeric claims, by regime, for the canonical run.
+  Grounding is computed deterministically (\cref{sec:grounding}) by matching each numeric claim
+  in the rationale against the recorded tool outputs within a $1\%$ tolerance. The near-perfect
+  score (\groundingNumGrounded\ of \groundingNumClaims\ claims grounded overall) establishes
+  that the agent's \emph{factual} citations are real --- the precondition for reading any
+  faithfulness gap as a genuine knowledge--action gap rather than mere hallucination.}
+  \label{tab:grounding}
+  \begin{tabular}{l S}
+    \toprule
+    Regime & {Grounding} \\
+    \midrule
+    Bear            & \groundingBear \\
+    Bull            & \groundingBull \\
+    High volatility & \groundingHighVol \\
+    Range           & \groundingRange \\
+    \midrule
+    Overall         & \groundingOverall \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Grounding is essentially perfect in every regime (\groundingOverall\ overall), which is the
+desirable outcome: the agent does not fabricate the numbers it reasons over. This is what
+licenses the interpretation of the faithfulness results that follow.
+
+\subsection{Faithfulness: v1 versus v2 by regime}
+
+\Cref{tab:faithfulness} reports the policy-aware (v2) faithfulness alongside the v1 judge, by
+regime. The side-by-side presentation is itself a finding: it shows how much of the apparent
+unfaithfulness under the naive judge was an artifact of ignoring the agent's stated sizing
+policy (\cref{sec:v2judge}). Across the run, v2 raises faithfulness from \faithVoneOverall\ to
+\faithVtwoOverall, and --- because the policy-aware judge resolves capacity cases within its
+prompt --- the constrained category falls to zero, so the constrained bucket is no longer doing
+hidden work.
+
+\begin{table}[t]
+  \centering
+  \caption[Faithfulness by regime, v1 versus v2]{Faithfulness by regime under the v1
+  (max-deploy) and v2 (policy-aware) judges, canonical run. v2 is the canonical metric; v1 is
+  retained for comparison and reproducibility. ``v2 unfaithful'' counts the genuine
+  knowledge--action gaps under v2.}
+  \label{tab:faithfulness}
+  \begin{tabular}{l S[round-precision=0] S S S[round-precision=0]}
+    \toprule
+    Regime & {$n$} & {v1 faith.} & {v2 faith.} & {v2 unfaithful} \\
+    \midrule
+    Bear            & \nBear    & \faithVoneBear    & \faithBear    & \nUnfBear \\
+    Bull            & \nBull    & \faithVoneBull    & \faithBull    & \nUnfBull \\
+    High volatility & \nHighVol & \faithVoneHighVol & \faithHighVol & \nUnfHighVol \\
+    Range           & \nRange   & \faithVoneRange   & \faithRange   & \nUnfRange \\
+    \midrule
+    Overall         & \nDecisions & \faithVoneOverall & \faithVtwoOverall & \nUnfaithfulOverall \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent The qualitative pattern is clear and consequential. Faithfulness is \emph{lowest in
+the bull regime} (\faithBull) and highest in range (\faithRange), with bear (\faithBear) and
+high volatility (\faithHighVol) in between. The agent's reasoning is least aligned with its
+actions precisely when prices are rising: it states caution or a trim condition and keeps the
+position. Combined with near-perfect grounding, this is the knowledge--action gap in its
+clearest form --- the agent sees and correctly cites the evidence, then acts against it. The
+dominant mechanism is examined next.
+
+\subsection{The dominant unfaithfulness driver}
+
+The largest single class of unfaithful decisions is \emph{non-trimming}: cases where the judge
+predicts a sell/trim and the agent holds a position that has grown past the cap. We report this
+class because the v1 judge silently absorbed it into ``constrained,'' hiding it entirely; the
+policy-aware v2 judge exposes it (\cref{sec:v2judge}).
+
+\begin{table}[t]
+  \centering
+  \caption[Non-trimming as the dominant unfaithfulness class]{Decomposition of the
+  \nUnfaithfulOverall\ unfaithful decisions (canonical run). Non-trimming dominates, which
+  reframes the agent's weakness specifically as \emph{exit/trim discipline after near-cap
+  entries} rather than a diffuse reasoning failure. The concentration figure is the share of
+  non-trim cases in the single strongest-trending name.}
+  \label{tab:nontrim}
+  \begin{tabular}{l S}
+    \toprule
+    Quantity & {Value} \\
+    \midrule
+    Non-trim sells (judge=sell, agent=hold) & \nNonTrim \\
+    \quad as share of all unfaithful (\%)   & \pctNonTrim \\
+    True entry gaps (below target, bullish, cash available) & \nDoneGaps \\
+    Concentration in the dominant ticker (\%) & \nvdaNonTrimShare \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent Non-trim sells account for \nNonTrim\ of the \nUnfaithfulOverall\ unfaithful decisions
+(about \pctNonTrim\,\%), and roughly \nvdaNonTrimShare\,\% of them are concentrated in the single
+strongest-trending name. True entry gaps --- positions held below target with cash available and
+a bullish signal --- number only \nDoneGaps. The agent's reasoning failure is thus specific and
+interpretable: it builds positions toward the cap and then does not cut them when the evidence
+turns, rather than failing diffusely across decision types.
+
+\section{Validity: judge--human agreement}
+\label{sec:resultsanchor}
+
+The faithfulness judge is anchored to human annotation (\cref{sec:anchor}). Because the
+annotation sample is stratified rather than representative, agreement is reported
+\emph{per stratum} in \cref{tab:agreement}; a single global figure would misrepresent a
+deliberately rare-case-weighted sample.
+
+\begin{table}[t]
+  \centering
+  \caption[Judge--human agreement]{Judge--human action agreement on the stratified annotation
+  sample ($n=\nAnnotated$). Per-stratum agreement is the meaningful quantity; the global
+  figures are reported with the explicit caveat that the sample over-represents diagnostic
+  strata and is not a population estimate.}
+  \label{tab:agreement}
+  \begin{tabular}{l S}
+    \toprule
+    Quantity & {Value} \\
+    \midrule
+    Annotated rows & \nAnnotated \\
+    Global action agreement (\%) & \judgeHumanAgreement \\
+    Global Cohen's $\kappa$ & \judgeHumanKappa \\
+    \midrule
+    Agreement on non-trim stratum (\%) & \agreementNonTrim \\
+    Agreement on entry-gap stratum (\%) & \agreementDone \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent Global agreement is \judgeHumanAgreement\,\% ($\kappa=\judgeHumanKappa$, substantial).
+The per-stratum view is more informative than the headline: agreement is \emph{perfect}
+(\agreementNonTrim\,\%) on the dominant non-trim class --- the finding that matters most ---
+and \emph{poor} (\agreementDone\,\%) on the small entry-gap stratum, where decisions sit around
+the $10\%$ target threshold under weak or mixed signals and even a careful human disagrees with
+the judge. A separate \emph{blind} reconciliation on the medium window --- annotations filled
+against sealed fields, the key opened only afterward --- gave an action agreement of
+\blindAgreement\,\% with $\kappa=\blindKappa$ over $n=\blindN$ decisions. The two procedures
+together support the v2 judge for the thesis, with the residual weakness localised and
+documented rather than hidden.
+
+\section{Multi-agent Portfolio Manager (common-reference extension)}
+\label{sec:resultspm}
+
+The PM results below are from the same one-year common-reference run used in
+\cref{tab:commonfinancial}: \commonPmRunId, \commonStart\ to \commonEnd, \commonUniverse.
+They characterise the multi-agent pipeline's behaviour on the shared benchmark. Because the
+Sharpe interval crosses zero, the PM remains an architecture extension rather than a headline
+performance claim.
+
+\begin{table}[t]
+  \centering
+  \caption[Portfolio-Manager evaluation (common-reference run)]{Evaluation of the multi-agent
+  Portfolio Manager on the common-reference window. PM faithfulness is measured at the
+  allocation level (\cref{sec:pmeval}); the strict variant excludes capacity-constrained
+  decisions. Evidence grounding audits analysts' cited evidence against tool outputs. The MCP
+  time-machine audit confirms no future timestamp reached the agent.}
+  \label{tab:pm}
+  \begin{tabular}{l S}
+    \toprule
+    Quantity & {Value} \\
+    \midrule
+    PM decisions & \commonPmDecisions \\
+    Errored decisions ($n_{\text{pm\_errors}}$) & \commonPmErrors \\
+    PM faithfulness (overall) & \commonPmFaith \\
+    PM faithfulness (strict) & \commonPmFaithStrict \\
+    Analyst evidence grounding & \commonPmGrounding \\
+    MCP time-machine violations & \multicolumn{1}{c}{\commonTimeMachineViolations} \\
+    Cost drag (bps) & \commonPmCostDrag \\
+    Turnover (\%) & \commonPmTurnover \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent Three things stand out, all of them about \emph{correctness} rather than performance.
+First, the artifact is leak-free: the MCP time-machine audit found
+\commonTimeMachineViolations\ timestamp violations across all checks, with every price read
+served from cache and every news item from the corpus. Second, analyst evidence grounding is
+effectively perfect (\commonPmGrounding): every checkable technical, risk, and news claim is
+traceable to a tool output, and --- following the news-hallucination fix of \cref{sec:rigour} --- news evidence
+carries a source and publication date. (The PM's \emph{final} rationale is concise and carries no
+numeric claims, so its numeric grounding is reported as ``no claims,'' which is expected, not a
+failure.) Third, faithfulness is mixed: strict PM faithfulness is \commonPmFaithStrict, while
+overall faithfulness is \commonPmFaith\ once constrained allocations are counted. The three
+PM API errors are explicit, excluded from reasoning tables, and included in the reported error
+rate; they are system reliability observations, not silent all-cash successes.
+
+We deliberately do \emph{not} headline the PM's annualised return or Sharpe: even on the full
+common-reference year, the bootstrap Sharpe confidence interval \commonPmSharpeCI\ crosses
+zero. The honest conclusion is that the multi-agent pipeline generalises the evaluation harness
+to a richer architecture and remains leak-free and evidence-grounded, but it does not establish
+a statistically reliable performance edge over the single agent or Buy-\&-Hold.
+
+\section{News integration: actual state}
+\label{sec:resultsnews}
+
+Consistent with \cref{sec:news}, the news corpus is disabled by default and enabled explicitly
+for the common-reference runs. The corpus populated for the validation window
+(\newsCorpusWindow) is sourced from \newsCorpusSource, with row counts
+AAPL${}=\newsCountAAPL$, MSFT${}=\newsCountMSFT$, NVDA${}=\newsCountNVDA$. Provider limitations
+are reported honestly: a free Finnhub plan returned no rows for this older window, and a
+crawl-based enrichment key failed to authenticate locally, so the corpus relies on the source
+that exposes a true publication timestamp. With news enabled, the artifact-level audit found no
+\code{published\_at} after \tnow\ and every non-empty news report carried a source-and-date
+reference, confirming the evidence discipline of \cref{sec:news} in practice.
+
+\section{Systems and cost}
+\label{sec:resultssystems}
+
+On the systems axis, the common-reference single-agent and PM runs consumed
+\commonTotalTokens\ tokens and \commonTotalCost\ of incremental model spend, over
+\commonWallClockMinutes\ minutes of wall-clock time. The local telemetry recorded
+\commonSingleApiCalls\ single-agent/judge API calls and \commonPmApiCalls\ PM-chain API calls,
+including cache hits and per-span latency. This local accounting is used because Langfuse OTLP
+export is best-effort and timed out on several batches during the long PM run. The test suite
+stands at \nTests\ passing tests, the standing evidence for the rigour claim of
+\cref{sec:rigour}.
+
+\begin{prelim}
+The one-year common-reference run reproduces the qualitative single-agent pattern seen at full
+scale --- grounding remains high, faithfulness is strongest in bear and weakest in bull, and
+cost/turnover accounting is now explicit. Earlier one-month medium runs are retained only as
+development checks and are not thesis performance results.
+\end{prelim}

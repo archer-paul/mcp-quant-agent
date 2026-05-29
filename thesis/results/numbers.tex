@@ -1,0 +1,234 @@
+% =====================================================================
+% results/numbers.tex
+% -----------------------------------------------------------------------
+% SINGLE SOURCE OF TRUTH for every result number cited in the thesis.
+%
+% STATUS (updated after the runs landed):
+%   * Single-agent CANONICAL FULL run  gpt-4-1-mini_20260528_112645
+%     (2022-07-01 -> 2024-06-30, 5 tickers, 2505 decisions) -- FILLED.
+%   * PM BOUNDED validation run  pm_api_smoke_20260529_155400
+%     (2023-01-03 -> 2023-01-31, 3 tickers, 20 decisions, news ON) -- FILLED.
+%   * Genuinely-unmeasured items (per-regime financials; per-decision
+%     latency/token telemetry) remain {\TODO{...}} and render as a red
+%     [TODO: ...] flag in the PDF.
+%
+% Most result cells live in siunitx "S" columns, which reject non-numeric
+% tokens. FILLED numeric macros are therefore BARE numbers (e.g. 2.35) so
+% they align on the decimal marker. TEXT values (ids, CIs, fractions) and
+% any remaining \TODO are wrapped in braces {...}, which siunitx passes
+% through as literal text. DO NOT edit the chapter sources; cite macros.
+%
+% HARD RULE (enforced by hand): never annualise a Sharpe ratio computed on
+% a short window. The PM bounded run is ONE MONTH; its annualised return
+% and Sharpe are NOT reported as headline figures anywhere (its bootstrap
+% Sharpe CI straddles zero: [-2.61, 14.19]).
+% =====================================================================
+
+% ---------------------------------------------------------------------
+% 0. Run identity / scope
+% ---------------------------------------------------------------------
+\newcommand{\runId}{{\texttt{gpt-4-1-mini\_20260528\_112645}}}
+\newcommand{\pmRunId}{{\texttt{pm\_api\_smoke\_20260529\_155400}}}
+\newcommand{\studyStart}{{2022-07-01}}
+\newcommand{\studyEnd}{{2024-06-30}}
+\newcommand{\universeList}{{AAPL, MSFT, NVDA, JPM, XOM}}
+\newcommand{\nDecisions}{2505}
+\newcommand{\nPmDecisions}{20}
+\newcommand{\nParseErrors}{0}
+% PM bounded-run scope (3 tickers, one month)
+\newcommand{\pmStart}{{2023-01-03}}
+\newcommand{\pmEnd}{{2023-01-31}}
+\newcommand{\pmUniverse}{{AAPL, MSFT, NVDA}}
+
+% ---------------------------------------------------------------------
+% 1. Financial performance — single-agent CANONICAL FULL run vs baselines
+%    NOTE: this run predates the symmetric-cost integration (see the cost
+%    caveat in chapters/results.tex). Agent returns are GROSS of agent
+%    transaction costs; baselines include 10 bps one-way costs.
+% ---------------------------------------------------------------------
+\newcommand{\agentAnnReturn}{72.1}
+\newcommand{\agentSharpe}{2.35}
+\newcommand{\agentSharpeCI}{{[0.92,\,3.58]}}
+\newcommand{\agentSortino}{2.74}
+\newcommand{\agentCalmar}{5.76}
+\newcommand{\agentMaxDD}{12.5}
+\newcommand{\agentHitRate}{54.6}
+\newcommand{\agentFinalNAV}{{\$293{,}594}}
+% Per-run agent turnover / cost-drag were NOT instrumented in this run
+% (it predates symmetric costing). Reported instead from the cost-correct
+% medium and PM validations in prose. Left as TODO; rows removed from table.
+\newcommand{\agentTurnover}{{\TODO{agent turnover \% (uncosted run)}}}
+\newcommand{\agentCostDrag}{{\TODO{agent cost drag bps (uncosted run)}}}
+
+% Equal-weight baselines, SAME full window, 10 bps one-way
+% (results/baselines_20260526_235938.csv, EQUAL-WT rows)
+\newcommand{\bhAnnReturn}{73.0}
+\newcommand{\bhSharpe}{2.27}
+\newcommand{\momAnnReturn}{24.7}
+\newcommand{\momSharpe}{1.91}
+\newcommand{\mrAnnReturn}{16.6}
+\newcommand{\mrSharpe}{1.41}
+
+% Regime composition of the canonical run (summary.csv regime_*_days)
+\newcommand{\actBuy}{183}
+\newcommand{\actSell}{26}
+\newcommand{\actHold}{2296}
+\newcommand{\pctBear}{20.5}
+\newcommand{\pctBull}{44.3}
+\newcommand{\pctHighVol}{20.3}
+\newcommand{\pctRange}{14.9}
+
+% ---------------------------------------------------------------------
+% 2. Reasoning metrics — grounding (deterministic)
+%    (results/.../reasoning_metrics.csv; HANDOVER: 8240/8255)
+% ---------------------------------------------------------------------
+\newcommand{\groundingOverall}{0.998}
+\newcommand{\groundingNumClaims}{8255}
+\newcommand{\groundingNumGrounded}{8240}
+\newcommand{\groundingBear}{0.999}
+\newcommand{\groundingBull}{0.997}
+\newcommand{\groundingHighVol}{1.000}
+\newcommand{\groundingRange}{0.998}
+
+% ---------------------------------------------------------------------
+% 3. Reasoning metrics — faithfulness (results/.../faithfulness_dual.csv)
+%    v1 = max-deploy (comparison); v2 = policy-aware (canonical)
+% ---------------------------------------------------------------------
+\newcommand{\faithVoneOverall}{0.272}
+\newcommand{\faithVtwoOverall}{0.671}
+\newcommand{\faithVtwoStrictOverall}{0.671}
+\newcommand{\nUnfaithfulOverall}{825}
+\newcommand{\faithBear}{0.731}
+\newcommand{\faithBull}{0.576}
+\newcommand{\faithHighVol}{0.721}
+\newcommand{\faithRange}{0.799}
+\newcommand{\faithVoneBear}{0.429}
+\newcommand{\faithVoneBull}{0.159}
+\newcommand{\faithVoneHighVol}{0.330}
+\newcommand{\faithVoneRange}{0.316}
+\newcommand{\nBear}{513}
+\newcommand{\nBull}{1109}
+\newcommand{\nHighVol}{509}
+\newcommand{\nRange}{374}
+% v2 unfaithful counts by regime
+\newcommand{\nUnfBear}{138}
+\newcommand{\nUnfBull}{470}
+\newcommand{\nUnfHighVol}{142}
+\newcommand{\nUnfRange}{75}
+
+% dominant unfaithfulness driver (non-trim sells); HANDOVER/DECISIONS canonical
+\newcommand{\nNonTrim}{613}
+\newcommand{\pctNonTrim}{74}
+\newcommand{\nDoneGaps}{8}
+\newcommand{\nvdaNonTrimShare}{67}
+
+% ---------------------------------------------------------------------
+% 4. Judge<->human anchoring (validity cornerstone)
+% ---------------------------------------------------------------------
+\newcommand{\judgeHumanAgreement}{83.8}
+\newcommand{\judgeHumanKappa}{0.705}
+\newcommand{\nAnnotated}{80}
+\newcommand{\agreementNonTrim}{100.0}
+\newcommand{\agreementDone}{12.5}
+% blind medium reconciliation (separate artifact)
+\newcommand{\blindAgreement}{79.6}
+\newcommand{\blindKappa}{0.561}
+\newcommand{\blindN}{49}
+
+% ---------------------------------------------------------------------
+% 5. PM multi-agent BOUNDED validation (pm_api_smoke_20260529_155400)
+%    Coherence: scoreable=57, faithful=26, unfaithful=5, constrained=26.
+%    strict = 26/31 = 0.839 ; overall = 26/57 = 0.456.
+% ---------------------------------------------------------------------
+\newcommand{\pmFaithOverall}{0.456}
+\newcommand{\pmFaithStrict}{0.839}
+\newcommand{\pmConstrainedFrac}{{26\,/\,57}}
+\newcommand{\pmEvidenceGrounding}{1.000}
+\newcommand{\pmEvidenceCoverage}{0.948}
+\newcommand{\pmTimeMachineViolations}{{0\,/\,965}}
+\newcommand{\pmCostDrag}{8.75}
+\newcommand{\pmTurnover}{87.5}
+\newcommand{\pmNErrors}{0}
+\newcommand{\pmNReports}{180}
+\newcommand{\pmEvidenceItems}{705}
+
+% ---------------------------------------------------------------------
+% 6. News corpus (feature; off by default; only the PM bounded run uses it)
+% ---------------------------------------------------------------------
+\newcommand{\newsCorpusSource}{{Alpha Vantage \textsc{news\_sentiment}}}
+\newcommand{\newsCorpusWindow}{{2023 common-reference year}}
+\newcommand{\newsCountAAPL}{575}
+\newcommand{\newsCountMSFT}{954}
+\newcommand{\newsCountNVDA}{517}
+
+% ---------------------------------------------------------------------
+% 7. Systems / cost
+% ---------------------------------------------------------------------
+\newcommand{\medianLatency}{{\TODO{median decision latency ms (from Langfuse)}}}
+\newcommand{\meanTokens}{{\TODO{mean tokens / decision (from Langfuse)}}}
+\newcommand{\costPerDecision}{{\$0.00095}}      % approx: 2.37 / 2505
+\newcommand{\totalRunCost}{{\$2.37}}            % agent run; +~\$0.55 for the two judge passes
+\newcommand{\nTests}{395}
+
+% ---------------------------------------------------------------------
+% 8. Bootstrap (eval/financial.py default n_bootstrap = 1000)
+% ---------------------------------------------------------------------
+\newcommand{\bootstrapResamples}{1000}
+\newcommand{\minNavPoints}{30}   % STABLE: documented minimum NAV points for a meaningful CI
+
+% COMMON-REFERENCE AUTOGENERATED START
+% 1-year common-reference run; generated by scripts/summarize_common_reference.py
+\newcommand{\commonRunLabel}{{1-year common-reference run}}
+\newcommand{\commonStart}{{2023-01-03}}
+\newcommand{\commonEnd}{{2023-12-29}}
+\newcommand{\commonUniverse}{{AAPL, MSFT, NVDA}}
+\newcommand{\commonSingleRunId}{{\texttt{gpt-4-1-mini\_20260529\_172840}}}
+\newcommand{\commonPmRunId}{{\texttt{pm\_api\_smoke\_20260529\_181859}}}
+\newcommand{\commonNTradingDays}{250}
+\newcommand{\commonSingleDecisions}{750}
+\newcommand{\commonPmDecisions}{250}
+\newcommand{\commonPmErrors}{3}
+\newcommand{\commonPmErrorRate}{0.012}
+\newcommand{\commonSingleAnnReturn}{44.0}
+\newcommand{\commonSingleSharpe}{2.791}
+\newcommand{\commonSingleSharpeCI}{{[0.861, 4.523]}}
+\newcommand{\commonSingleMaxDD}{6.9}
+\newcommand{\commonSingleTurnover}{569.88}
+\newcommand{\commonSingleCostDrag}{56.99}
+\newcommand{\commonPmAnnReturn}{49.3}
+\newcommand{\commonPmSharpe}{1.842}
+\newcommand{\commonPmSharpeCI}{{[-0.119, 3.643]}}
+\newcommand{\commonPmMaxDD}{18.2}
+\newcommand{\commonPmTurnover}{1805.46}
+\newcommand{\commonPmCostDrag}{180.55}
+\newcommand{\commonSingleFaith}{0.628}
+\newcommand{\commonSingleFaithStrict}{0.628}
+\newcommand{\commonSingleGrounding}{0.932}
+\newcommand{\commonPmFaith}{0.417}
+\newcommand{\commonPmFaithStrict}{0.545}
+\newcommand{\commonPmGrounding}{1.0}
+\newcommand{\commonTimeMachineViolations}{{0\,/\,18650}}
+\newcommand{\commonSingleApiCalls}{1494}
+\newcommand{\commonPmApiCalls}{2512}
+\newcommand{\commonTotalTokens}{13898184}
+\newcommand{\commonTotalCost}{{\$6.4091}}
+\newcommand{\commonWallClockMinutes}{248.4}
+\newcommand{\commonBhAnnReturn}{120.8}
+\newcommand{\commonBhSharpe}{2.842}
+\newcommand{\commonBhSharpeCI}{{[0.976, 4.527]}}
+\newcommand{\commonBhMaxDD}{13.3}
+\newcommand{\commonBhTurnover}{200.2}
+\newcommand{\commonBhCostDrag}{20.02}
+\newcommand{\commonMomAnnReturn}{26.9}
+\newcommand{\commonMomSharpe}{1.167}
+\newcommand{\commonMomSharpeCI}{{[-0.828, 2.925]}}
+\newcommand{\commonMomMaxDD}{22.1}
+\newcommand{\commonMomTurnover}{2066.67}
+\newcommand{\commonMomCostDrag}{206.67}
+\newcommand{\commonMrAnnReturn}{22.0}
+\newcommand{\commonMrSharpe}{2.162}
+\newcommand{\commonMrSharpeCI}{{[0.249, 3.918]}}
+\newcommand{\commonMrMaxDD}{5.6}
+\newcommand{\commonMrTurnover}{433.33}
+\newcommand{\commonMrCostDrag}{43.33}
+% COMMON-REFERENCE AUTOGENERATED END

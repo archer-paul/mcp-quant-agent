@@ -1,0 +1,49 @@
+% ---------------------------------------------------------------------
+% Figure: clock-gated data flow. raw cache -> t_now filter -> tool ->
+% agent, contrasting an included past bar with an excluded future bar.
+% ---------------------------------------------------------------------
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}[
+      >=Stealth, font=\footnotesize, node distance=14mm,
+      box/.style={draw, rounded corners, align=center, minimum height=10mm,
+                  minimum width=24mm, thick},
+      bar/.style={draw, minimum width=7mm, minimum height=6mm, font=\scriptsize},
+      pass/.style={fill=accent!12, draw=accent!55},
+      drop/.style={fill=todored!12, draw=todored!55},
+    ]
+    \node[box, fill=gray!8] (cache) {Raw parquet\\cache\\\scriptsize (unfiltered)};
+    \node[box, fill=todored!8, draw=todored!60, right=18mm of cache] (filter)
+      {\code{filter\_rows}\\\scriptsize keep ts $\le\tnow$};
+    \node[box, fill=accent!8, right=18mm of filter] (tool) {\mcp\ tool\\\scriptsize output};
+    \node[box, fill=gray!8, right=16mm of tool] (agent) {Agent};
+
+    \draw[->, thick] (cache) -- (filter);
+    \draw[->, thick] (filter) -- (tool);
+    \draw[->, thick] (tool) -- (agent);
+
+    % illustrative bars above the cache
+    \node[bar, pass, above=10mm of cache.north west, anchor=west] (b1) {$t{-}2$};
+    \node[bar, pass, right=1mm of b1] (b2) {$t{-}1$};
+    \node[bar, pass, right=1mm of b2] (b3) {$\tnow$};
+    \node[bar, drop, right=1mm of b3] (b4) {$t{+}1$};
+    \node[bar, drop, right=1mm of b4] (b5) {$t{+}2$};
+    \node[font=\scriptsize, above=1mm of b3] {boundary};
+
+    \draw[->, gray] (b3.south) to[bend right=10] (cache.north);
+    \draw[->, todored!70, dashed] (b4.south) to[bend left=8] (filter.north)
+      node[midway, right, font=\scriptsize\itshape, text=todored]{dropped};
+
+    \node[font=\scriptsize\itshape, text=gray, below=2mm of filter, text width=42mm,
+          align=center]
+      {strict inequality: the bar dated exactly \tnow\ is \emph{included}; $t{+}1$ is
+       \emph{excluded}};
+  \end{tikzpicture}
+  \caption[Clock-gated data flow]{The clock-gated read path. Data is cached raw and never
+  pre-trimmed; the \tnow\ filter is applied at read time inside the data wrapper. The
+  invariant is a strict inequality --- the bar timestamped exactly \tnow\ is returned, the
+  first future bar ($t{+}1$) is dropped --- so the agent sees ``the world as of the close of
+  \tnow'' and nothing later. The single-item variant \code{assert\_not\_future} \emph{raises}
+  instead of dropping, for cases where a future timestamp is unambiguously a bug.}
+  \label{fig:clockflow}
+\end{figure}

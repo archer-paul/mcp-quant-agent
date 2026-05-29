@@ -1,0 +1,226 @@
+\chapter{Evaluation Design}
+\label{ch:evaluation}
+
+The evaluation is the thesis's graded core, and this chapter defines it before any numbers
+are reported. We cover the financial metrics and their regime segmentation
+(\cref{sec:finmetrics}), then the three reasoning metrics --- faithfulness
+(\cref{sec:faithfulness}), grounding (\cref{sec:grounding}), and sophistication
+(\cref{sec:sophistication}) --- explaining in each case \emph{why} the chosen measurement
+strategy fits the quantity. \Cref{sec:anchor} treats the judge--human anchoring that
+underwrites the validity of the faithfulness metric. \Cref{sec:pmeval} extends the protocol
+to the multi-agent path, and \cref{sec:rigour} presents the rigour narrative: the chain of
+bugs caught, diagnosed, fixed, and tested. \Cref{fig:evalprotocol} summarises the protocol.
+
+\input{figures/fig_eval_protocol}
+
+\section{Financial performance}
+\label{sec:finmetrics}
+
+Financial performance is reported against the baselines of \cref{sec:baselines} using a
+standard risk-adjusted metric set computed in \file{eval/financial.py}: annualised return,
+the Sharpe~\cite{sharpe1994} and Sortino~\cite{sortino1994} ratios, the Calmar ratio,
+maximum drawdown, and hit rate, alongside turnover and cost drag. The metrics are pure
+functions of the \nav\ series, which makes them trivially testable and cacheable. Each point
+estimate is accompanied by the bootstrap confidence interval of \cref{sec:bootstrap}, and
+the agent is compared on the \emph{same} window, the \emph{same} costs, and the \emph{same}
+shift discipline as the baselines.
+
+Crucially, financial performance is reported \emph{by regime}. A headline Sharpe that
+aggregates a bull run with a high-volatility episode hides exactly the behaviour the thesis
+is about. The regime labels of \cref{sec:regime} partition the decision sequence, and every
+metric is recomputed within each partition. The expected --- and most interesting ---
+finding is that performance and reasoning quality both degrade in adversarial regimes, in
+line with ATLAS~\cite{atlas2025} and LiveTradeBench~\cite{livetradebench2025}.
+
+\section{Faithfulness: the knowledge--action gap}
+\label{sec:faithfulness}
+
+\subsection{What it measures, and why a judge}
+
+Faithfulness measures the knowledge--action gap of KellyBench~\cite{kellybench2026}: does the
+agent \emph{do} what its reasoning implies it should do? The naive implementation --- parse
+an intended action from the rationale and compare it to the executed action --- measures
+almost nothing, because both fields are produced by the same LLM call and are trivially
+self-consistent. Keyword extraction from the rationale is also fragile on nuanced prose
+(``I will not sell yet'' misfires). The faithfulness signal we want is not internal
+self-consistency but consistency between the agent's behaviour and what a \emph{rational
+observer} would do on the same evidence.
+
+We therefore use an independent LLM judge (temperature $0$ for determinism) that sees
+\emph{only} the objective evidence the agent saw --- ticker, date, regime, technical
+indicators, and the portfolio snapshot --- and predicts the rational action \emph{blind}: it
+is shown neither the agent's rationale nor its executed action, so it cannot echo them. We
+then compare the judge's prediction to the agent's actual executed action. This is the
+reason faithfulness uses a judge while grounding does not (\cref{sec:grounding}):
+faithfulness is an inherently judgemental counterfactual --- ``what \emph{should} a rational
+agent have done here?'' --- whereas grounding is a factual check that has a deterministic
+ground truth.
+
+\subsection{Three verdicts}
+
+Each scored decision receives one of three verdicts:
+\begin{description}
+  \item[Faithful] the agent's action matches what the policy-aware judge would do --- whether
+  that is to trade or, deliberately, to hold.
+  \item[Constrained] the agent could not have acted: a genuine \emph{capacity} constraint
+  (e.g.\ cash below a minimal-trade threshold on the buy side, or a zero position on the
+  sell side). These are excluded from the strict faithfulness denominator because they are
+  not reasoning failures.
+  \item[Unfaithful] a real gap: the judge predicts an action, the agent does not take it, and
+  no capacity reason explains the difference.
+\end{description}
+The standard faithfulness rate counts faithful over all scoreable decisions; a
+\emph{strict} variant additionally removes constrained decisions from the denominator. We
+report both for comparability.
+
+\subsection{Policy-awareness: the v1$\rightarrow$v2 redesign}
+\label{sec:v2judge}
+
+The first judge (v1) assumed a rational agent always deploys to the hard cap. This
+systematically mislabelled deliberate holds at the $10$--$15\%$ target as unfaithful,
+because the judge ``saw room to buy'' that the agent's own policy forbade using. The
+correction (v2) makes the judge \emph{policy-aware}: it is told the base target ($10\%$),
+the high-conviction target ($15\%$), and the hard cap ($20\%$), and that once a position is
+at or above target, holding is the rational default unless a sell condition exists.
+
+This redesign was \emph{pre-registered}: the policy specification and the verdict semantics
+were locked, and validated by the author, \emph{before} the v2 numbers were computed. Locking
+the metric definition before seeing its result is a direct response to KellyBench's warnings
+about post-hoc metric tuning, and it is what lets us report the v1/v2 comparison as a
+genuine methodological finding rather than a fit to a desired number. Both judges are kept in
+the codebase behind a flag, and the thesis reports them side by side: v1 for comparison and
+reproducibility, v2 as the canonical metric.
+
+A structural consequence of policy-awareness is that the v2 judge resolves capacity cases
+itself (it predicts ``hold'' for an at-cap or cash-starved position), so the explicit
+constrained-override fires far less often --- the prompt does the work the override used to
+do. The redesign also \emph{exposed} a finding the v1 judge had hidden: a class of
+non-trimming decisions that v1 silently absorbed into ``constrained'' but v2 correctly marks
+unfaithful. This is discussed quantitatively in \cref{ch:results}.
+
+\section{Grounding: are the cited numbers real?}
+\label{sec:grounding}
+
+Grounding asks whether the numbers the agent cites in its reasoning are the actual outputs of
+the tools it called, or hallucinations. Because this question has a deterministic ground
+truth --- the tool outputs are recorded in the decision record --- it is computed
+deterministically, with no LLM in the loop. A regex extracts \texttt{(label, value)} numeric
+claims from the rationale; each claim is matched against the recorded indicator dictionary,
+the recent OHLCV bars, or the portfolio snapshot within a $1\%$ relative tolerance. Grounding
+is the fraction of claims that match. Decisions with no numeric claims score as ``no signal''
+and are not penalised --- an unquantified rationale is not a hallucination.
+
+The contrast with faithfulness is deliberate and is the methodological point of having both:
+grounding is cheap, deterministic, and re-runnable for free on any decision file, so it
+anchors the evaluation in a measurement that involves no model judgement at all; faithfulness
+necessarily involves judgement and is therefore the metric that must be anchored to humans
+(\cref{sec:anchor}). Reporting both protects against the failure mode where an agent cites
+perfectly real numbers (high grounding) but acts against them (low faithfulness), which is
+exactly the knowledge--action gap.
+
+\section{Sophistication}
+\label{sec:sophistication}
+
+The third reasoning axis, planned in the manner of KellyBench's multi-point sophistication
+rubric, scores a sampled subset of decisions on a small, explicit rubric --- risk
+management, acknowledgement of uncertainty, regime adaptation, and coherence --- via an
+LLM judge with structured output, sampled per regime to bound cost. Sophistication is the
+most subjective of the three metrics and is reported as a planned, supporting measure rather
+than a headline; its rubric maps directly onto the thesis claims about regime-adaptive
+reasoning. Its results, where computed, are reported in \cref{ch:results} with the same
+regime segmentation and the same candour about sampling.
+
+\section{Anchoring the judge to humans}
+\label{sec:anchor}
+
+A metric computed by an LLM judge is only as trustworthy as its agreement with human
+judgement; this anchoring is the validity cornerstone of the reasoning evaluation. We draw a
+stratified sample of decisions, have them annotated blind against the same policy the judge
+uses, and report the judge--human action agreement and Cohen's $\kappa$~\cite{cohen1960}.
+
+Two points of rigour govern how the agreement is reported. First, the sample is
+\emph{stratified} (deliberately over-sampling rare and diagnostic cases such as the
+non-trimming class), not a representative random draw; we therefore report agreement
+\emph{per stratum} and refrain from presenting a single global $\kappa$ as if the sample were
+representative. If a population-level estimate is needed, a separate random sample must be
+drawn. Second, a blind protocol is used for the medium-window reconciliation: annotations are
+filled against sealed fields, and the key is opened only afterward, so the human labels
+cannot be retrofitted to the judge. The per-stratum agreement, the global figures with their
+representativeness caveat, and the blind-reconciliation result are all reported in
+\cref{sec:resultsanchor}.
+
+\section{Extending the protocol to the multi-agent path}
+\label{sec:pmeval}
+
+The PM path needs two adaptations. First, the regime label of a portfolio-level decision is
+aggregated across its tickers by worst case (\textsc{high\_vol} $>$ \textsc{bear} $>$
+\textsc{range} $>$ \textsc{bull}), so a portfolio decision inherits the most adverse regime
+it faces. Second, faithfulness is redefined at the allocation level: for each
+ticker after the first (baseline) decision, the PM's target-weight \emph{direction}
+(increase/hold/decrease) is checked against the weighted analyst consensus, with the same
+capacity-constraint exemptions (no cash to rebalance, already concentrated, cannot short from
+zero).
+
+Grounding also splits in two. The PM's final rationale is concise and often carries no
+numeric claims, so the standard grounding metric can legitimately return ``no claims'' for
+it --- which is not a failure. To audit the \emph{analysts'} evidence, a separate
+\emph{evidence-grounding} metric checks each analyst's technical and risk claims against
+indicators, bars, portfolio, and regime, and each news claim against the causal news tool
+outputs by source and publication date. Finally, an artifact-level \emph{MCP time-machine
+audit} sweeps the entire decision file for any tool output, order, or fill timestamped after
+\tnow, and reports the per-source counts so that cache-versus-API provenance stays visible.
+This audit is the empirical counterpart of \cref{inv:nolookahead}: it demonstrates, on the
+completed artifact, that no future timestamp ever reached the agent.
+
+\section{The rigour narrative: bugs caught, diagnosed, fixed, tested}
+\label{sec:rigour}
+
+This section is an argument, not a confession. A thesis whose central claim is methodological
+rigour is strengthened, not weakened, by showing that its instruments \emph{caught} real
+defects and that each defect was closed with a regression test. Each item below follows the
+same shape: symptom $\rightarrow$ diagnosis $\rightarrow$ fix $\rightarrow$ test.
+
+\begin{description}
+  \item[Price-corruption masquerade.] An early run collapsed not from look-ahead but from a
+  single-ticker download whose column structure yielded a non-scalar where a scalar close was
+  expected; a permissive exception handler accepted the malformed bars silently. The
+  anti-look-ahead tests checked \emph{when} a bar was dated, never \emph{what} it contained.
+  \emph{Fix}: a fail-loud data-sanity gate (\file{bar\_validation.py}) plus a price-continuity
+  guard rejecting implausible adjacent-bar jumps, on both write and read paths. \emph{Test}:
+  a suite that reproduces the exact failure mode (multi-element series) and a cache-read
+  regression guard.
+  \item[Engine cap inverted.] A position-cap clamp set the order quantity \emph{up} to the
+  cap rather than \emph{down}, inflating small legitimate orders to the ceiling and destroying
+  the portfolio. \emph{Fix}: clamp strictly downward (\code{min(quantity, capped)}).
+  \emph{Test}: order-sizing tests that fail if the clamp direction inverts.
+  \item[Look-ahead in the regime detector (v1$\rightarrow$v2).] The v1 volatility threshold
+  used a full-series percentile, so a future spike could re-label past bars. \emph{Fix}: a
+  trailing 252-bar percentile, fully causal. \emph{Test}: an assertion that fails if a
+  full-series percentile is reintroduced.
+  \item[Asymmetric transaction costs.] The agent paid nothing while baselines paid friction,
+  invalidating the comparison. \emph{Fix}: $10$\,bps symmetric costs on both sides plus
+  reported cost drag. \emph{Test}: a per-run assertion of cost symmetry.
+  \item[News hallucination.] With no news available, the news analyst fabricated sentiment
+  from technical indicators. \emph{Fix}: restrict the news prompt to news outputs only and
+  emit a zero-weight ``unavailable'' marker when no items exist. \emph{Test}: a check that
+  news evidence may not contain technical-indicator keywords, plus consensus-weight tests.
+  \item[Silent PM failures.] A broad exception handler turned PM failures into all-cash
+  fallbacks indistinguishable from genuine allocations. \emph{Fix}: tag errored decisions
+  explicitly and exclude them from every metric, logging the raw completion that failed.
+  \emph{Test}: the metrics filter on the error tag.
+  \item[Warm-up too short.] The warm-up window was shorter than the volatility-percentile
+  window, so early bars used a compressed threshold. \emph{Fix}: derive the warm-up from the
+  detector parameters ($271$ trading days) and centralise the constant. \emph{Test}: an
+  anti-regression test that fails if the constant is too small or the window changes without
+  realignment.
+  \item[Token truncation and transient API errors.] Verbose chain-of-thought JSON truncated
+  at a small token cap, poisoning the response cache; and a transient server error aborted the
+  run before the first valid bar. \emph{Fix}: raise the token cap and retry genuinely
+  transient errors with back-off. \emph{Test}: parse-clean assertions on the decision schema.
+\end{description}
+
+Taken together these were not random slips but a systematic hardening of every layer ---
+data, execution, evaluation, orchestration --- each closed by a test that would catch its
+recurrence. The suite that results (\nTests\ tests at the time of writing) is the standing
+evidence for the rigour claim, and the most sensitive of these tests --- the clock invariant
+and the metric computations --- are the components the supervisor reviews directly.

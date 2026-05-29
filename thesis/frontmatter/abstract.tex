@@ -1,0 +1,42 @@
+% ---- Abstract -------------------------------------------------------
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+
+Large language models (LLMs) increasingly articulate plausible trading strategies, yet
+recent benchmarks show that this fluency does not translate into sound decisions: models
+introduce look-ahead leakage into their own backtests, fail to adapt across market
+regimes, and execute trades inconsistent with their stated reasoning --- the
+\emph{knowledge--action gap}. This thesis asks not whether an LLM agent can trade, but
+whether we can build a harness that measures, rigorously and by construction, \emph{how
+well it reasons} while doing so.
+
+We design an autonomous trading agent that perceives market data, technical indicators,
+news sentiment, portfolio state and order execution \emph{only} through Model Context
+Protocol (\mcp) tool servers, operating in a \mbox{perceive\,$\rightarrow$\,reason\,$\rightarrow$\,act\,$\rightarrow$\,observe}
+loop. The central methodological contribution is an \emph{\mcp-as-time-machine} design: a
+single simulation clock exposes \tnow, and every data tool refuses, at read time, to
+return any datum dated strictly after \tnow. The agent calls the identical tools in
+backtest and in live operation; only the clock advances. Look-ahead bias is therefore
+\emph{structurally impossible} rather than avoided by discipline, and this guarantee is
+pinned by tests written before the data layer existed (test-driven development) and
+exercised by mutation testing.
+
+On top of this substrate we build a regime-segmented evaluation of reasoning quality with
+three complementary metrics: \emph{faithfulness} (does the executed trade match what a
+rational, policy-aware judge would do given the same evidence?), measured by a blind
+LLM judge and anchored to human annotation; \emph{grounding} (are the numbers cited in the
+chain-of-thought real outputs of the tools that were actually called?), computed
+deterministically; and a planned KellyBench-style \emph{sophistication} rubric. We report
+financial performance against shifted, symmetrically-costed Buy-\&-Hold, momentum and
+mean-reversion baselines, with bootstrap confidence intervals.
+
+The primary result is the single-agent system; a Portfolio-Manager multi-agent extension
+(analyst reports, a Bull/Bear research debate, a risk debate and a synthesising allocator)
+is reported as a bonus that tests whether explicit deliberation closes the
+exit-discipline gap observed in the single agent.
+
+\bigskip
+\noindent\textit{All quantitative results are reported via centralised macros: the
+single-agent figures are from the full two-year canonical run, and the multi-agent figures
+from a bounded one-month validation that establishes the pipeline's causal correctness rather
+than a full track record; see \cref{ch:results}.}

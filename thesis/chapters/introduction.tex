@@ -1,0 +1,89 @@
+\chapter{Introduction}
+\label{ch:intro}
+
+\section{Motivation}
+
+Large language models can now articulate trading strategies with striking fluency. They
+discuss momentum and mean-reversion, weigh news against technicals, and produce confident,
+well-structured rationales for buying or selling. Yet a growing body of evidence shows that
+this fluency is a poor guide to decision quality. LiveTradeBench~\cite{livetradebench2025}
+finds that general LLM leaderboard scores barely correlate with realised trading returns ---
+a model that ranks highly on generic benchmarks need not trade well --- which implies that
+trading agents require their own, purpose-built evaluation. KellyBench~\cite{kellybench2026}
+goes further, showing in a long-horizon sequential-decision setting that frontier models
+articulate correct strategies but fail to execute them: they code a sizing rule and never
+invoke it, they introduce label leakage into their own backtests, they declare success
+prematurely, and their single-run results are unreliable. The recurring theme is a
+\emph{knowledge--action gap}: stating the right thing and doing a different thing.
+
+For an autonomous trading agent, the most dangerous instance of this gap is look-ahead bias.
+Because the agent and its harness are built from code that has, in principle, access to the
+entire historical record, it is alarmingly easy to leak future information into a past
+decision --- and almost as easy to convince oneself, after the fact, that no such leak
+occurred. The backtesting literature is unanimous that the only robust defence is
+architectural: leakage must be impossible by construction, not avoided by discipline.
+
+\section{Research question and contribution}
+
+This thesis asks: \emph{can we build an autonomous trading agent on a standardised tool
+protocol such that look-ahead is structurally impossible, and can we evaluate the quality of
+its reasoning --- not merely its returns --- rigorously and by market regime?}
+
+The contribution is twofold, and the order reflects where the academic value lies.
+
+\begin{enumerate}
+  \item \textbf{The \mcp-as-time-machine design.} The agent accesses market data, technical
+  indicators, news sentiment, portfolio state, and order execution \emph{only} through Model
+  Context Protocol~\cite{mcp2024} (\mcp) tool servers. A single simulation clock exposes
+  \tnow, and every data tool refuses, at read time, to return any datum dated strictly after
+  it. The agent calls the identical tools in backtest and in live operation; only the clock
+  advances. Look-ahead is therefore impossible by construction (\cref{inv:nolookahead}), a
+  guarantee pinned by tests written before the data layer and falsified by mutation testing.
+  This is the central methodological contribution.
+  \item \textbf{A regime-aware evaluation of reasoning quality.} On top of this substrate we
+  measure three reasoning properties, each segmented by market regime: \emph{faithfulness}
+  (does the executed trade match what a rational, policy-aware judge would do on the same
+  evidence?), validated against blind human annotation; \emph{grounding} (are the numbers in
+  the rationale real tool outputs?), computed deterministically; and a planned
+  \emph{sophistication} rubric. Performance is reported against shifted, symmetrically-costed
+  baselines with bootstrap confidence intervals.
+\end{enumerate}
+
+The primary, canonical result is a single trading agent. A multi-agent Portfolio Manager
+--- analyst reports, a Bull/Bear research debate, a risk debate, and a synthesising allocator
+in the manner of \textsc{TradingAgents}~\cite{tradingagents2024} --- is reported honestly as
+a bonus extension. This hierarchy is deliberate: the project is graded on evaluation rigour,
+not on the number of agents, and Agent Market Arena~\cite{ama2025} shows that agent
+architecture, not backbone choice, drives behaviour --- so the interesting question about the
+multi-agent system is behavioural (does deliberation close the single agent's
+exit-discipline gap?), not whether more agents are intrinsically better.
+
+\section{Why MCP, and why now}
+
+The Model Context Protocol standardises how an LLM agent reaches external tools. Its
+relevance here is not fashion but methodology: because the agent composes heterogeneous \mcp\
+servers behind a uniform interface, and because each data server's wrapper owns the temporal
+filter, the \emph{same} tool calls drive both backtest and live operation. This makes the
+backtest/live equivalence exact rather than approximate, which is precisely what gives the
+look-ahead guarantee its force. The \mcp\ layer is thus the architectural enabler of the
+methodological claim, not a separable engineering detail.
+
+\section{Scope}
+
+The primary asset class is US equities at daily frequency over a window spanning at least two
+market regimes, where regime labelling and baselines are cleanest and the closest comparable
+benchmark, StockBench~\cite{stockbench2025}, is equity-centric. Cross-asset generalisation
+(e.g.\ crypto) and reinforcement-learning fine-tuning of the agents are identified as future
+work rather than attempted here, to keep the evaluation --- the graded core --- solid.
+
+\section{Thesis structure}
+
+\Cref{ch:related} situates the work against the evaluation benchmarks and multi-agent
+frameworks it builds on. \Cref{ch:methodology} develops the methodological spine: the
+\mcp-as-time-machine design, test-driven anti-leakage, the leakage channels a temporal filter
+does not close, regime labelling, baselines, and the bootstrap. \Cref{ch:architecture}
+describes the system: the \mcp\ servers, the single-agent orchestrator, the multi-agent
+Portfolio Manager, the news corpus, and observability. \Cref{ch:evaluation} defines the
+evaluation protocol and presents the rigour narrative of bugs caught and closed.
+\Cref{ch:results} reports results. \Cref{ch:discussion} interprets them and states the
+limitations honestly, and \cref{ch:conclusion} concludes.

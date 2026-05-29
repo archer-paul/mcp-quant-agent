@@ -1,0 +1,217 @@
+\chapter{System Architecture}
+\label{ch:architecture}
+
+This chapter describes the system that sits on top of the methodological substrate of
+\cref{ch:methodology}. We move from the layered view (\cref{sec:layers}) through the
+\mcp\ tool servers (\cref{sec:servers}), the single-agent orchestrator that is the thesis's
+\emph{primary} result (\cref{sec:single}), the Portfolio-Manager multi-agent extension that
+is reported as a \emph{bonus} (\cref{sec:pm}), the news corpus and its causal design
+(\cref{sec:news}), and the observability layer that feeds the evaluation
+(\cref{sec:observability}). Throughout, we are explicit about what is on the critical path
+and what is not, because that hierarchy is itself part of the contribution: the thesis is
+graded on evaluation rigour, and the architecture is sequenced to protect it.
+
+\input{figures/fig_architecture}
+
+\section{Layered overview}
+\label{sec:layers}
+
+\Cref{fig:architecture} shows four layers. At the base is the clock substrate of
+\cref{sec:timemachine}: raw cached data filtered to $\le\tnow$ at read time. Above it sit
+three \mcp\ servers --- \emph{data}, \emph{analytics}, and \emph{execution} --- each a
+narrow, typed surface. Above those, the agent orchestrator composes the servers in its
+reasoning loop. At the top, the evaluation harness consumes the structured decision records
+the orchestrator emits. The key architectural premise, and the one that matches the thesis
+topic, is that the agent reaches \emph{all} capabilities --- market data, indicators,
+sentiment, portfolio state, execution --- only through \mcp\ tool calls, never through
+in-process shortcuts. This is what makes the backtest/live equivalence exact: the same tool
+calls, the same server code, only a different clock.
+
+\section{The MCP tool servers}
+\label{sec:servers}
+
+\subsection{Data server}
+
+The data server wraps external sources (yfinance for prices, Finnhub and Alpha Vantage for
+news) behind tools that enforce \cref{inv:nolookahead}. Its tools expose price history,
+news items, and derived metadata; each filters its output through the clock before
+returning. Crucially, the wrapper --- not the external source --- owns the temporal
+guarantee, so swapping or adding a data provider does not move the choke point. The decision
+to wrap rather than re-implement external \mcp\ data servers reflects the topic's intent:
+the agent composes heterogeneous \mcp\ servers, and the thesis's own server exposes only
+what is thesis-specific.
+
+\subsection{Analytics server}
+
+The analytics server exposes custom technical indicators, the regime detector of
+\cref{sec:regime}, and backtest utilities. Indicators are precomputed once per dataset and
+read through the tool, rather than recomputed every bar, so the hot path stays light. The
+indicator and sentiment formulas were adapted from the supervisor's reference teaching
+code, re-implemented in our codebase with type annotations, tests, and the temporal filter
+rather than imported wholesale.
+
+\subsection{Execution server}
+
+The execution server is an in-memory paper-trading broker: \code{place\_order},
+\code{get\_portfolio}, \code{get\_pnl}. It accepts an explicit price parameter rather than
+looking up a price internally, which keeps it independent of the data server (no circular
+dependency) and makes the price assumption explicit and traceable in every decision record.
+It enforces the portfolio constraints structurally: long-only, no leverage, non-negative
+cash, and a hard per-position cap. The cap is enforced at order time by clamping the
+requested quantity \emph{down} to the admissible maximum --- never up --- a direction that,
+when once inverted, was the cause of a catastrophic early run and is now both fixed and
+tested (\cref{sec:rigour}).
+
+\section{Single-agent orchestrator (primary result)}
+\label{sec:single}
+
+The single-agent system is the thesis's primary, canonical result. It is a minimal
+LangGraph~\cite{langgraph2024} graph implementing the loop of \cref{fig:loop}: a small,
+explicit, typed state object flows through perceive, reason/act, and observe nodes, with the
+clock advancing once per step. LangGraph is used here in its canonical tutorial shape ---
+\code{StateGraph}, nodes, conditional edges, checkpointing --- deliberately on the simplest
+possible surface, so that the framework is learned \emph{off} the evaluation critical path.
+The decision to introduce LangGraph in this order, rather than starting with a complex
+multi-agent graph, is recorded in the decision log as a risk-management choice.
+
+\subsection{Sizing policy and why it matters for evaluation}
+
+The agent operates a simple, explicit position-sizing policy, stated in its system prompt: a
+base target of $10\%$ of \nav\ per position, a high-conviction target of $15\%$, and a hard
+cap of $20\%$. This policy is not incidental --- it is the reference against which
+faithfulness is judged (\cref{sec:faithfulness}). A judge that did not know the policy would
+mistake a deliberate hold at the $10\%$ target for a reasoning failure; encoding the policy
+into the judge is precisely the fix that distinguishes the v1 and v2 judges.
+
+\subsection{Decision record schema}
+
+After each step the orchestrator writes one JSON line to \file{decisions.jsonl}, flushed
+immediately so that a crash never loses a paid-for decision. The record captures both halves
+of what the reasoning metrics need: the \emph{stated} side (full chain-of-thought rationale,
+intended action) and the \emph{actual} side (the executed order and fill, the regime label,
+the flattened indicator values, and the raw tool outputs the agent saw). Recording the raw
+tool outputs --- recent OHLCV bars, the indicator dictionary, the portfolio snapshot with
+each position's percentage of \nav\ --- is what makes grounding verifiable: a claim in the
+prose can be checked against the number the tool actually returned. This dual capture is the
+schema-level reason the faithfulness and grounding metrics are well-defined.
+
+\subsection{Asynchronous execution without breaking determinism}
+
+The per-bar loop issues one LLM call per ticker. To keep wall-clock time tractable, calls
+within a single date are dispatched concurrently under a bounded semaphore, but all tickers
+on a date are scored against the \emph{same} start-of-date portfolio snapshot, and orders
+are then executed serially in a deterministic ticker order. A non-regression test asserts
+that the concurrent path produces byte-identical decisions to a serial run, so concurrency
+is a pure latency optimisation with no effect on results. Transient API errors are retried
+with exponential back-off; this, and a token-budget fix, were prerequisites for the long run
+to complete at all (\cref{sec:rigour}).
+
+\section{Portfolio-Manager multi-agent extension (bonus)}
+\label{sec:pm}
+
+The multi-agent Portfolio Manager (PM) is reported honestly as a \emph{bonus} on top of the
+single-agent result, not as a prerequisite. This hierarchy follows directly from the
+project's evaluation-first principle and from the finding of Agent Market
+Arena~\cite{ama2025} that architecture matters more than backbone: the interesting question
+is whether deliberation changes \emph{behaviour}, specifically whether it closes the
+single-agent's exit-discipline gap. \Cref{fig:pmpipeline} shows the pipeline.
+
+\input{figures/fig_pm_pipeline}
+
+\subsection{Communication topology}
+
+The PM adopts the \textsc{TradingAgents}~\cite{tradingagents2024} communication topology:
+role analysts (technical, news, risk) produce reports; a bounded Bull/Bear research debate
+and a research manager synthesise an investment thesis; a trader proposes a position; a
+bounded Aggressive/Conservative/Neutral risk debate stress-tests it; and a single Portfolio
+Manager emits portfolio-level target weights. The cyclic debate is exactly the structure
+that a hand-rolled loop handles awkwardly and a graph framework handles cleanly, which is
+where LangGraph earns its place in the second phase rather than the first.
+
+We adopt the \emph{contract} --- the role decomposition and the bounded message shape --- but
+do not import third-party code: the topology is re-implemented over our \mcp\ tool layer
+with compact JSON artifacts at each node instead of an unbounded chat transcript, so that the
+cache, the decision schema, the rebalancer, and the evaluation plumbing remain unchanged. The
+PM emits strict JSON parsed into a typed target-weight object; invalid JSON, negative weights,
+unknown tickers, or implied leverage fail loudly at the parser boundary.
+
+\subsection{Deterministic rebalancing and fail-loud errors}
+
+Target weights are turned into orders by a \emph{deterministic} rebalancer, separating the
+stochastic decision (the LLM allocation) from the mechanical execution (share counts under
+the long-only, no-leverage, non-negative-cash constraints). A subtle but important
+correctness property is that a PM API or parsing failure is tagged explicitly
+(\code{is\_error}) and an all-cash fallback is written so the artifact is inspectable;
+errored decisions are then excluded from every metric. Without this tag, a silent failure
+would be indistinguishable from a legitimate all-cash allocation and would quietly pollute
+the faithfulness tables.
+
+\subsection{Causal memory}
+
+The PM keeps an append-only memory log of past decisions and their later realised returns,
+so that the deliberation can reference prior lessons in the manner of
+\textsc{TradingAgents}. The log is gated by the clock: \code{get\_past\_context(t\_now)}
+returns only entries whose decision date is strictly before \tnow\ \emph{and} whose outcomes
+have already resolved, and the context is capped to the most recent entries to keep the
+prompt bounded. This makes the memory a causal utility rather than a leakage channel: a
+future outcome cannot enter a past deliberation by construction.
+
+\section{News: a causally correct sentiment corpus}
+\label{sec:news}
+
+News sentiment is the data source where causal correctness is most fragile, and it is
+treated as a \emph{feature} that is disabled by default rather than a load-bearing part of
+the primary result. Two distinct risks shape the design.
+
+\paragraph{Publication date versus event date.} A story about an earnings call (the event)
+may be published before or after the call. Only the \emph{publication} timestamp
+(\code{published\_at}) is observable to an agent at \tnow; filtering on the event date would
+leak. The corpus and its clock filter therefore key strictly on \code{published\_at}.
+
+\paragraph{Weight-memory contamination.} As in \cref{sec:leakage}, a real corpus does not
+remove the model's latent knowledge of historical outcomes; it only makes the grounding
+metric meaningful, by giving the news analyst's cited claims verifiable extracts to be
+checked against. We state this limitation plainly rather than overclaim.
+
+\paragraph{Corpus construction.} Candidate sources were evaluated on whether they expose a
+true publication timestamp. Finnhub and Alpha Vantage do; a crawl-based source exposes only
+crawl time and is therefore unsuitable as a primary timestamp. The corpus is built once,
+cached to parquet, and filtered by \code{published\_at <= t\_now} at read time, exactly like
+prices --- it is a static artifact, not a live scrape. A feature flag keeps the corpus off
+by default; the primary single-agent result does not depend on it. We report the real state
+honestly in \cref{ch:results}, including provider limitations encountered (a free Finnhub
+plan that returned no rows for the older window, and a crawl key that failed locally).
+
+\paragraph{Evidence discipline.} A diagnosed bug (\cref{sec:rigour}) had the news analyst
+fabricating sentiment from technical indicators when no news was available. The fix has two
+parts: the news analyst's prompt is restricted to \emph{only} news tool outputs (no
+indicators, prices, or portfolio), and when no items exist for any ticker the LLM call is
+skipped entirely in favour of a structured ``sentiment unavailable'' marker that contributes
+zero weight to the consensus. Sentiment without a cited, timestamped extract is treated as
+hallucination, not signal.
+
+\section{Observability}
+\label{sec:observability}
+
+Every decision is traced to Langfuse Cloud~\cite{langfuse2024} as a structured object:
+inputs seen, tool calls and their real outputs, the chain-of-thought, the resulting order,
+latency, token count, and cost. We use Langfuse Cloud rather than self-hosting, since the
+trace volume of a thesis is far below the free allowance and self-hosting would add
+operational overhead for no benefit. OpenAI calls are traced via the SDK drop-in; PM
+decisions emit a parent observation with child spans for each analyst, each debate stage, and
+the final allocation, so the multi-agent structure is legible in the trace tree. The
+reasoning metrics of \cref{ch:evaluation} consume the same captured inputs and outputs, and
+the metric scores are attached back onto traces, which yields regime-segmented dashboards at
+no extra cost. Trace export is best-effort: an export timeout never fails a local run, since
+the authoritative artifact is the on-disk \file{decisions.jsonl}, not the trace.
+
+\section{LLM backbone interface}
+\label{sec:backbone}
+
+The agents run on the OpenAI API behind a thin backbone interface, so that swapping or
+adding a model --- for instance a second model for an architecture-versus-backbone
+comparison in the spirit of~\cite{ama2025} --- is a localised change. In development the
+backbone defaults to the cheapest capable model with a prompt-hash response cache, so that
+re-runs during debugging cost nothing; the more expensive configuration is reserved for the
+final run. A deterministic stub backbone exists for plumbing and CI, and any run using it is
+labelled as such and is never cited as a thesis result.

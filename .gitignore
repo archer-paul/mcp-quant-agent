@@ -28,6 +28,21 @@ runs/
 results/
 *.log
 
+# Thesis source is tracked; generated LaTeX build artefacts are not.
+thesis/archive/
+thesis/**/*.aux
+thesis/**/*.bbl
+thesis/**/*.bcf
+thesis/**/*.blg
+thesis/**/*.lof
+thesis/**/*.lot
+thesis/**/*.out
+thesis/**/*.pdf
+thesis/**/*.run.xml
+thesis/**/*.toc
+!thesis/results/
+!thesis/results/numbers.tex
+
 # OS / editor
 .DS_Store
 .idea/

@@ -1,0 +1,73 @@
+% ---------------------------------------------------------------------
+% Figure: PM multi-agent pipeline (TradingAgents-style communication
+% topology): analysts -> bull/bear debate -> research manager -> trader
+% -> risk debate -> PM weights -> memory log.
+% ---------------------------------------------------------------------
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}[
+      >=Stealth, font=\scriptsize, node distance=8mm and 11mm,
+      n/.style={draw, rounded corners, align=center, minimum height=9mm,
+                minimum width=20mm, thick, fill=accent!8, draw=accent!55},
+      deb/.style={n, fill=todored!8, draw=todored!55},
+      pm/.style={n, fill=gray!12, draw=gray!60, minimum width=26mm},
+      mem/.style={draw, rounded corners, align=center, minimum height=9mm,
+                  fill=gray!6, draw=gray!50, minimum width=26mm},
+    ]
+    % analysts column
+    \node[n] (tech) {Technical\\analyst};
+    \node[n, below=of tech] (news) {News\\analyst};
+    \node[n, below=of news] (risk) {Risk\\analyst};
+
+    % debate
+    \node[deb, right=14mm of tech] (bull) {Bull\\researcher};
+    \node[deb, below=of bull] (bear) {Bear\\researcher};
+    \node[n, right=12mm of {$(bull)!0.5!(bear)$}] (rm) {Research\\manager};
+
+    \node[n, right=12mm of rm] (trader) {Trader};
+
+    % risk debate
+    \node[deb, right=12mm of trader, yshift=8mm] (agg) {Aggressive};
+    \node[deb, below=4mm of agg] (con) {Conservative};
+    \node[deb, below=4mm of con] (neu) {Neutral};
+
+    \node[pm, below=14mm of trader] (pm) {\textbf{Portfolio Manager}\\target weights};
+    \node[mem, left=12mm of pm] (memlog) {Causal memory log\\\scriptsize resolved $<\tnow$ only};
+
+    % flows
+    \draw[->] (tech) -- (bull);
+    \draw[->] (news) -- (bull);
+    \draw[->] (risk) -- (bear);
+    \draw[->] (tech) -- (bear);
+    \draw[<->, dashed, todored!70] (bull) -- (bear) node[midway, right]{debate};
+    \draw[->] (bull) -- (rm);
+    \draw[->] (bear) -- (rm);
+    \draw[->] (rm) -- (trader);
+    \draw[->] (trader) -- (agg);
+    \draw[->] (trader) -- (con);
+    \draw[->] (trader) -- (neu);
+    \draw[->] (agg.east) -- ++(5mm,0) |- (pm.east);
+    \draw[->] (con.east) -- ++(5mm,0) |- (pm.east);
+    \draw[->] (neu.east) -- ++(5mm,0) |- (pm.east);
+    \draw[->] (pm) -- (memlog) node[midway, above, font=\scriptsize]{append};
+    \draw[->, dashed] (memlog) to[bend left=20] (rm)
+      node[midway, left, font=\scriptsize\itshape]{past context};
+
+    \begin{scope}[on background layer]
+      \node[draw=accent!25, rounded corners, fit=(tech)(news)(risk),
+            inner sep=2.5mm, label={[font=\scriptsize\bfseries,accent!70]above:analysts}]{};
+      \node[draw=todored!25, rounded corners, fit=(agg)(con)(neu),
+            inner sep=2.5mm, label={[font=\scriptsize\bfseries,todored!70]above:risk debate}]{};
+    \end{scope}
+  \end{tikzpicture}
+  \caption[Portfolio-Manager multi-agent pipeline]{The Portfolio-Manager (PM) multi-agent
+  pipeline, adopting the \textsc{TradingAgents} communication topology re-implemented over
+  our \mcp\ tool layer. Role analysts each see only their role-appropriate tool outputs (the
+  news analyst, crucially, sees \emph{only} news items --- see \cref{sec:news}); a bounded
+  Bull/Bear debate and a research manager synthesise a thesis; a trader proposes; a bounded
+  Aggressive/Conservative/Neutral risk debate stress-tests it; and a single Portfolio
+  Manager emits portfolio-level target weights, which a deterministic rebalancer turns into
+  orders. A causal memory log feeds back only decisions resolved strictly before \tnow, so
+  the deliberation never leaks future outcomes.}
+  \label{fig:pmpipeline}
+\end{figure}

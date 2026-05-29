@@ -1,0 +1,66 @@
+% ---------------------------------------------------------------------
+% Figure: layered architecture. MCP servers (data / analytics /
+% execution) -> agent orchestrator -> evaluation harness, all sitting on
+% the clock substrate.
+% ---------------------------------------------------------------------
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}[
+      >=Stealth, font=\footnotesize,
+      layer/.style={draw, rounded corners, align=center, minimum height=12mm,
+                    thick},
+      srv/.style={draw, rounded corners, align=center, minimum width=30mm,
+                  minimum height=12mm, fill=accent!8, draw=accent!55},
+      band/.style={draw, rounded corners, align=center, minimum width=120mm,
+                   minimum height=12mm},
+    ]
+    % evaluation (top)
+    \node[band, fill=todored!6, draw=todored!50] (eval)
+      {\textbf{Evaluation harness}\quad financial metrics $\cdot$ faithfulness $\cdot$ grounding $\cdot$ sophistication $\cdot$ regime segmentation};
+
+    % agent layer
+    \node[band, below=7mm of eval, fill=gray!8, draw=gray!55] (agent)
+      {\textbf{Agent orchestrator (LangGraph)}\quad single-agent loop \;$\big|$\; PM multi-agent debate};
+
+    % MCP server row
+    \node[srv, below=7mm of agent.south west, anchor=north west, xshift=2mm] (data)
+      {\mcp\ \textbf{data}\\\scriptsize prices, news\\\scriptsize \tnow-filtered wrappers};
+    \node[srv, right=8mm of data] (analytics)
+      {\mcp\ \textbf{analytics}\\\scriptsize indicators, regime,\\\scriptsize backtest};
+    \node[srv, right=8mm of analytics] (exec)
+      {\mcp\ \textbf{execution}\\\scriptsize place\_order,\\\scriptsize portfolio, PnL};
+
+    % clock substrate (bottom)
+    \node[band, below=7mm of analytics, fill=todored!10, draw=todored!60, very thick,
+          minimum width=120mm] (clock)
+      {\textbf{Simulation clock \tnow}\quad raw disk cache (parquet) $\rightarrow$ \code{filter\_rows} ($\le\tnow$) $\rightarrow$ tool output};
+
+    % external data behind data server
+    \node[layer, above left=6mm and -28mm of data, fill=white, draw=gray!45,
+          minimum width=30mm] (ext)
+      {\scriptsize external sources:\\\scriptsize yfinance, Finnhub,\\\scriptsize Alpha Vantage};
+
+    % arrows
+    \draw[->, thick] (agent) -- (eval) node[midway, right]{traces, decisions.jsonl};
+    \draw[<->, thick] (agent.south) -- ++(0,-6mm) -| (data.north);
+    \draw[<->, thick] (agent.south) -- ++(0,-6mm) -| (analytics.north);
+    \draw[<->, thick] (agent.south) -- ++(0,-6mm) -| (exec.north);
+    \draw[->, thick] (data) -- (clock);
+    \draw[->, thick] (analytics) -- (clock);
+    \draw[->, thick] (ext) -- (data);
+
+    \begin{scope}[on background layer]
+      \node[draw=accent!30, rounded corners, fit=(data)(analytics)(exec),
+            inner sep=4mm, label={[accent!70,font=\scriptsize\bfseries]above left:MCP tool layer}] {};
+    \end{scope}
+  \end{tikzpicture}
+  \caption[Layered system architecture]{Layered architecture. External data sources enter
+  only through \mcp\ \emph{data} wrappers that enforce the \tnow\ filter; the \emph{analytics}
+  and \emph{execution} servers expose indicators/regime/backtest and paper-trading
+  respectively. The orchestrator composes these heterogeneous servers --- the core premise of
+  the thesis topic --- and emits one structured decision record per step. The evaluation
+  harness consumes those records. The clock substrate underlies every read: data is cached
+  raw and filtered to $\le\tnow$ at read time, so a single cache file is reusable across
+  runs at different clock positions.}
+  \label{fig:architecture}
+\end{figure}

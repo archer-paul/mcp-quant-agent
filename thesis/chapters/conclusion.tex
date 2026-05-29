@@ -1,0 +1,43 @@
+\chapter{Conclusion}
+\label{ch:conclusion}
+
+This thesis set out to build an autonomous trading agent on a standardised tool protocol such
+that look-ahead bias is impossible by construction, and to evaluate the quality of its
+reasoning --- not merely its returns --- rigorously and by market regime.
+
+The methodological contribution is the \emph{\mcp-as-time-machine} design. A single simulation
+clock exposes \tnow; every Model Context Protocol data tool refuses, at read time, to return
+any datum dated strictly after it; and the agent calls the identical tools in backtest and in
+live operation, so the two are exactly equivalent and look-ahead is structurally impossible
+rather than merely discouraged (\cref{inv:nolookahead}). This guarantee is pinned by tests
+written before the data layer and falsified by mutation testing, and it is complemented by
+explicit treatment of the leakage channels a temporal filter does not close --- adjusted-price
+leakage and weight-memory contamination --- the latter documented honestly as a residual
+threat rather than overclaimed.
+
+The evaluation contribution is a regime-segmented measurement of reasoning quality:
+faithfulness (the knowledge--action gap), measured by a blind, policy-aware, temperature-zero
+LLM judge and anchored to blind human annotation; grounding, computed deterministically against
+recorded tool outputs; and a sophistication rubric modelled on KellyBench. The combination of
+near-perfect grounding with a regime-dependent faithfulness gap is the central qualitative
+finding, and the diagnosis of that gap as an exit-discipline problem --- visible only once the
+judge was made policy-aware and pre-registered --- is itself a methodological result.
+
+The single-agent system is the primary, canonical result; the multi-agent Portfolio Manager is
+reported honestly as a bonus that tests whether explicit deliberation changes behaviour. This
+hierarchy is deliberate and reflects the thesis's governing principle: the contribution is the
+\emph{harness that measures the knowledge--action gap cleanly for tool-using agents}, not the
+number of agents in it. The rigour narrative --- a chain of real bugs caught, diagnosed, fixed,
+and closed by regression tests --- is offered as the standing evidence that the instruments do
+what they claim.
+
+The single-agent claims are confirmed on the full two-year canonical run: grounding is
+near-perfect across regimes, faithfulness rises substantially under the pre-registered
+policy-aware judge yet remains lowest in the bull regime, and the dominant residual gap is a
+specific exit-discipline failure validated against human annotation. The later one-year
+common-reference run resolves the two drafting incoherences: single agent, PM, and baselines
+share the same window, tickers, warm-up, and $10$\,bps transaction costs. On that clean
+benchmark the PM extension is leak-free and evidence-grounded, but its Sharpe confidence
+interval crosses zero and its error rate is non-zero, so it remains an architecture extension
+rather than a performance claim. The design, the protocol, and their justification do not
+depend on asserting PM outperformance.

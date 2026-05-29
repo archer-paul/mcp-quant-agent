@@ -1,0 +1,303 @@
+\chapter{Methodology}
+\label{ch:methodology}
+
+This chapter sets out the methodological spine of the thesis. It is deliberately the
+longest and most detailed chapter, because the project is graded primarily on the rigour
+of its evaluation rather than on orchestration sophistication. We first state the central
+contribution --- the \emph{\mcp-as-time-machine} design that makes look-ahead bias
+structurally impossible (\cref{sec:timemachine}) --- and the test-driven discipline that
+pins it (\cref{sec:tdd}). We then treat the subtler leakage channels that a temporal
+filter alone does not close: adjusted-price leakage and weight-memory contamination
+(\cref{sec:leakage}). We define the market-regime labelling that segments every downstream
+metric (\cref{sec:regime}), the baselines and their costing (\cref{sec:baselines}), and the
+statistical treatment of uncertainty (\cref{sec:bootstrap}). The reasoning metrics
+themselves are deferred to \cref{ch:evaluation}.
+
+\section{The cardinal sin and the design response}
+\label{sec:cardinal}
+
+The dominant failure mode in LLM-driven backtesting is look-ahead bias: the agent, or the
+harness around it, is exposed to information that would not have been available at the
+moment of the simulated decision. KellyBench~\cite{kellybench2026} catalogues several
+concrete instances --- most strikingly, label leakage introduced by fitting a calibrated
+classifier on the full training set before the temporal split --- and shows that such
+leakage is easy to introduce and hard to detect after the fact. The consensus across the
+backtesting literature is that the only robust defence is \emph{architectural}: leakage
+must be made impossible by construction, not merely discouraged by careful coding.
+
+We take this seriously to the point of treating it as the organising principle of the
+entire data layer. The design goal is a single, auditable choke point through which all
+time-indexed data must pass, and a guarantee --- expressed as an executable invariant ---
+that nothing dated after the simulated present can cross it.
+
+\section{MCP-as-time-machine}
+\label{sec:timemachine}
+
+\subsection{The construction}
+
+We introduce a simulation clock that exposes a single timestamp, \tnow. The clock is
+implemented in \file{clock.py} as a small, heavily-tested module --- the one component of
+the codebase the supervisor is asked to review line by line. Every \mcp\ data tool, and
+every wrapper around an external data server, consults \code{get\_clock().t\_now} before
+returning any datum and filters its output so that no item dated strictly after \tnow\ can
+be returned. The agent calls the \emph{same} \mcp\ tools in backtest and in live operation;
+only the source that advances the clock differs (an event loop in backtest, the wall clock
+in live). \Cref{fig:loop} shows the resulting per-bar loop with the clock at its centre.
+
+\input{figures/fig_loop}
+
+This is the thesis's central methodological claim, and it is worth stating precisely.
+
+\begin{invariant}[No look-ahead]
+\label{inv:nolookahead}
+For any data tool $T$ invoked while the clock reads \tnow, every item $x$ in $T$'s output
+satisfies $\textsf{timestamp}(x) \le \tnow$. The bar timestamped exactly \tnow\ is
+included; the first future bar is excluded. The inequality is \emph{strict} on the future
+side.
+\end{invariant}
+
+The boundary semantics matter. A daily bar dated \tnow\ represents information known at the
+close of that trading day, which is precisely the agent's decision point; it must be
+visible. The next bar must not be. \Cref{fig:clockflow} illustrates the read path and the
+strict boundary.
+
+\input{figures/fig_clock_flow}
+
+\subsection{Two enforcement modes}
+
+The clock exposes two complementary guards, reflecting two genuinely different situations:
+
+\begin{itemize}
+  \item \code{filter\_rows(rows, date\_key)} --- the \emph{batch} guard. It returns only
+  the rows with timestamp $\le\tnow$ and silently drops the rest. This is the expected,
+  routine operation when slicing a cached price series to the visible window: future rows
+  in the cache are not a bug, they are simply not yet visible. Dropping them is the correct
+  behaviour.
+  \item \code{assert\_not\_future(ts, label)} --- the \emph{single-item} guard. It
+  \emph{raises} \code{FutureDataError} if \code{ts} is strictly after \tnow. This is used
+  where a future timestamp is unambiguously a defect rather than an expected trim --- for
+  instance, when an execution fill is stamped with a date the engine should never have
+  reached.
+\end{itemize}
+
+Both guards route through one internal comparison, and both fail loudly rather than
+returning a silent default. This reflects a project-wide convention: a silent fallback that
+masks a leak or a missing tool call is the worst possible bug in a thesis whose entire
+credibility rests on the absence of look-ahead. The codebase therefore raises on unexpected
+states everywhere in the data path.
+
+\subsection{Caching discipline that preserves the guarantee}
+
+Performance requires caching market data to disk (parquet) so that a backtest is
+re-runnable offline at zero API cost. Naively, caching and the temporal guarantee are in
+tension: a cache populated by one run could expose future data to another. We resolve this
+by \emph{caching raw data and applying the \tnow\ filter at read time}, never at write time.
+A single parquet file is therefore valid for a run at any clock position: the same AAPL
+cache serves a decision at \tnow${}={}$2023-01-03 and one at 2023-01-04, because the filter,
+not the file, defines what is visible. This is shown as the substrate in
+\cref{fig:architecture}.
+
+\subsection{Timestamp normalisation}
+
+A subtle correctness hazard is timezone handling. Comparing a timezone-aware news timestamp
+against a naive \tnow\ can misplace items across the boundary by up to a day. We normalise
+all timestamps to a single internal convention --- UTC-naive --- and, crucially, convert
+aware datetimes to UTC \emph{before} stripping the offset. A bare offset-strip would, for
+example, treat a Tokyo \texttt{+09:00} item as nine hours later than its true UTC instant,
+which can flip a past item into an apparent future one and trigger a spurious leak (or, in a
+filter context, an erroneous drop). The conversion is exercised in both boundary directions
+by dedicated tests.
+
+\section{Test-driven anti-leakage and mutation testing}
+\label{sec:tdd}
+
+The invariant in \cref{inv:nolookahead} is only as credible as the tests that enforce it.
+Following the project's TDD mandate, the anti-look-ahead tests were written \emph{before}
+the data layer they guard: \file{tests/test\_clock\_no\_lookahead.py} and
+\file{tests/test\_data\_temporal\_filter.py}. They assert, among other properties, that a
+tool returning a bar dated after \tnow\ causes a test failure --- which means the test
+suite is red until the filter is correctly in place. These tests are treated as
+non-negotiable: they are never weakened to make code pass.
+
+Passing a hand-written test, however, only shows that the guard works on the cases the
+author thought to write. To argue that the guard is \emph{load-bearing} --- that removing or
+weakening it would actually be caught --- we use mutation testing as a falsification check.
+Mutating the boundary comparison (for example, relaxing the strict future-side inequality
+\code{>} to \code{>=}, or inverting the filter predicate) must cause at least one test to
+fail. A surviving mutant would indicate a guard that is not actually exercised, which for
+this particular invariant is a methodological red flag rather than a mere coverage gap. The
+strict-versus-non-strict boundary is explicitly pinned this way.
+
+\section{Leakage channels a temporal filter does not close}
+\label{sec:leakage}
+
+\Cref{inv:nolookahead} closes the \emph{when} of leakage. Two further channels concern the
+\emph{what} and were the source of real, diagnosed bugs in this project; they are treated
+honestly here rather than glossed over.
+
+\subsection{Adjusted-price leakage}
+
+Split- and dividend-adjusted price histories encode \emph{future} corporate actions into
+past prices, because the adjustment factors are computed from the current state of the
+world. A backtest set in 2022 that reads 2022 prices adjusted for a 2023 split is, subtly,
+looking ahead. We therefore source \emph{unadjusted} prices throughout
+(\code{auto\_adjust=False}) and work with raw OHLCV. The cost is that long-horizon return
+comparisons are not split-corrected; this is the strictly preferable trade-off, because the
+alternative is silent contamination of exactly the kind the thesis claims to prevent. The
+choice is documented in the decision log.
+
+A related, harder lesson from this project is that temporal correctness does not imply
+\emph{value} correctness. An early run was corrupted not by look-ahead but by a data-handling
+defect: a single-ticker download returned a column structure that, when indexed naively,
+yielded a multi-element series where a scalar close price was expected, and a permissive
+exception handler silently accepted malformed bars. The anti-look-ahead fortress checked
+\emph{when} a bar was dated but never \emph{what} it contained. The response was a
+fail-loud data-sanity gate (\file{bar\_validation.py}) that rejects non-scalar, non-finite,
+non-positive, or internally inconsistent bars (e.g. high $<$ low, or a close outside a
+plausible band around the open), together with a price-continuity guard that raises on
+adjacent-bar jumps beyond a fixed ratio. These checks run on both the write and read paths,
+so a previously cached corrupt bar is caught on first access. This episode is revisited as
+part of the rigour narrative in \cref{sec:rigour}.
+
+\subsection{Weight-memory contamination}
+
+The most intractable channel is that the model's parameters already encode the approximate
+outcome of historical events. A model trained on data through early 2025 ``knows,'' in a
+diffuse statistical sense, how 2022--2024 unfolded; it can in principle infer future prices
+from recalled news even when no future datum is served. KellyBench frames this directly: a
+real news corpus does not eliminate the risk --- it only makes the grounding metric
+meaningful, by giving cited claims something verifiable to check against.
+
+We mitigate, and otherwise document honestly, rather than claim to solve:
+\begin{enumerate}
+  \item the agent is instructed to follow a rule-based process over tool outputs, reducing
+  reliance on free recall;
+  \item where feasible the test window is pushed toward, or past, the model's training
+  cutoff, so that recall is less informative;
+  \item the limitation is stated plainly as a threat to validity in \cref{sec:limitations},
+  in the spirit of KellyBench's own candour.
+\end{enumerate}
+This honesty is itself a graded virtue: a thesis that names the channel it cannot fully
+close is more credible than one that pretends the channel does not exist.
+
+\section{Market-regime labelling}
+\label{sec:regime}
+
+Every downstream metric --- financial and reasoning alike --- is segmented by market
+regime, because the thesis's substantive question is not ``can the agent trade?'' but
+``\emph{when}, and \emph{why}, does it trade well or badly?''. This requires a regime
+labelling that is itself causal: a label at bar $t$ must depend only on data up to $t$.
+
+\subsection{Why rule-based, not HMM}
+
+A hidden Markov model would give probabilistic regime assignments but requires fitting
+transition parameters on historical data; done naively on the full series, that fit leaks
+future information into past labels. We use instead a rule-based labelling from realised
+volatility and trend, with thresholds fixed before seeing the data. It is less elegant than
+an HMM but fully causal at every bar, which is the property the thesis needs; the HMM is
+noted as future work.
+
+\subsection{The detector}
+
+The labelling (\file{mcp\_servers/analytics/regime.py}) assigns one of four labels with the
+priority order \textsc{high\_vol} $>$ \textsc{bull} $>$ \textsc{bear} $>$ \textsc{range}.
+The current detector (v2) improves on an initial version (v1) in two ways that are both
+causality fixes:
+\begin{itemize}
+  \item \textbf{Reactive trend.} The bull/bear signal uses a short, 20-trading-day trend
+  window ($\pm 2\%$ threshold), roughly one calendar month. The earlier 60-day window
+  systematically lagged the 2022--2023 recovery, keeping a stale bearish label for weeks
+  after prices had turned. The shorter window pivots about a month earlier at recovery
+  inflections.
+  \item \textbf{Causal volatility threshold.} The \textsc{high\_vol} label fires when
+  realised volatility exceeds a trailing 252-bar percentile. The earlier version used a
+  full-series percentile, which is a look-ahead: a future volatility spike would raise the
+  threshold and silently re-label past bars when the series was extended. The trailing
+  percentile uses only bars up to $t$. A dedicated test fails if a full-series percentile is
+  reintroduced.
+\end{itemize}
+
+\subsection{Smoothing and warm-up}
+
+Raw labels flip too often to support meaningful segmentation: a large fraction of regime
+runs would otherwise last a single bar. We apply a causal minimum-hold smoothing (default
+three bars, one trading week): a regime change is confirmed only after the new label has
+persisted for the hold length. The smoothing is one-sided in time --- the smoothed label at
+$t$ depends only on raw labels up to $t$ --- and a test verifies this anti-look-ahead
+property explicitly. The raw label is retained as a diagnostic field.
+
+The detector also imposes a hard warm-up requirement, derived rather than guessed. The
+controlling constraint is the volatility-percentile window: for bar $t$ to have a
+fully-populated trailing window, $t$ must be at least
+$\textsf{vol\_window} + \textsf{vol\_percentile\_window} - 1 = 20 + 252 - 1 = 271$ trading
+days into the data. The data window for any run therefore extends the decision window
+backward by \code{REGIME\_WARMUP\_TRADING\_DAYS}${}=271$ trading days
+(\code{REGIME\_WARMUP\_CALENDAR\_DAYS}${}=420$ calendar days with a safety margin). Both
+backtest engines import this single constant, and an anti-regression test fails if it is set
+too small or if the percentile window is changed without realigning it --- so that the
+warm-up cannot silently drift out of sync with the detector. This guarantees that the first
+\emph{decision} bar already has a correctly-initialised regime label, and that no decision
+is excluded as warm-up.
+
+\section{Baselines}
+\label{sec:baselines}
+
+An agent's performance is meaningless without a systematic yardstick, and the yardstick must
+be at least as carefully constructed as the agent. We implement three baselines
+(\file{backtest/baselines.py}): equal-weight Buy-\&-Hold, time-series momentum, and
+Bollinger-band mean-reversion. Two properties make the comparison fair.
+
+\paragraph{One-bar signal shift.} Every baseline signal is computed from the close of bar
+$t$ and executed at bar $t{+}1$ (\code{exec\_signal = signal.shift(1)}). Same-bar execution
+would let a baseline trade on a close it could not yet have known --- the baselines' own
+look-ahead. A test fails if the shift is removed, mirroring the structural discipline applied
+to the agent.
+
+\paragraph{Symmetric transaction costs.} Costs were, in an earlier iteration, asymmetric ---
+the agent paid nothing while the baselines paid a round-trip friction --- which silently
+invalidated any comparison. We now charge $5$\,bps commission plus $5$\,bps slippage
+($10$\,bps one-way) to \emph{both} the agent and the baselines, with Buy-\&-Hold charged an
+entry and an exit cost. A test asserts cost symmetry on every run. We additionally report
+turnover and a \emph{cost drag} (total commission as a fraction of initial \nav, in bps), so
+that a high-turnover strategy's frictional cost is visible rather than buried in the net
+return.
+
+The baselines are computed vectorised in pandas, which is sufficient for daily data at this
+scale; the event-driven engine is reserved for the agent path, where bar-by-bar drip-feed
+realism matters. The decision to use pandas rather than a heavier vectorised backtester is
+recorded in the decision log and turns on readability, not performance.
+
+\section{Quantifying uncertainty: bootstrap confidence intervals}
+\label{sec:bootstrap}
+
+A single Sharpe number from a single run proves little; KellyBench shows single-seed
+estimates can vary widely. We therefore report a bootstrap confidence interval around the
+Sharpe ratio (\code{bootstrap\_sharpe\_ci} in \file{eval/financial.py}), resampling daily
+returns to form the interval. Two honest caveats apply.
+
+First, we use an \emph{i.i.d.}\ bootstrap rather than the stationary bootstrap of
+Politis and Romano~\cite{politis1994}. Daily equity returns have weak autocorrelation, so
+the i.i.d.\ resample is a reasonable approximation, but for a strategy with genuine momentum
+the interval width may be mildly understated. The stationary bootstrap is the principled
+upgrade and is flagged as such.
+
+Second, the interval is only meaningful with enough \nav\ points: on a very short window the
+resampled distribution degenerates and the interval collapses to a point. We treat
+\minNavPoints\ daily \nav\ points as the minimum for a reportable interval, and we
+\emph{never} annualise a Sharpe ratio computed on a short window --- annualising a Sharpe
+estimated over, say, nineteen trading days inflates a noisy monthly figure into a
+meaningless headline number. The full-period run is what supplies the thesis's confidence
+interval; short windows are used only for plumbing validation and are labelled as such.
+
+\section{Run scale tiers and reproducibility}
+\label{sec:tiers}
+
+LLM experiments cost real money, so every run declares a \emph{tier} (\file{backtest/tier.py})
+that bounds its size before any model is called: \textsc{smoke} (development and CI, no cost
+acknowledgement), \textsc{medium} (first real per-regime validation, up to about one month),
+and \textsc{full} (explicit thesis-scale runs). All tiers enforce the regime warm-up. Every
+result in this thesis is labelled with its scope: the older two-year single-agent run supports
+the primary reasoning diagnosis, while the one-year common-reference run supplies the clean
+cost-symmetric comparison. Development uses the cheapest capable model with cached responses
+keyed by prompt hash, so debugging re-runs cost nothing and thesis-scale runs are executed only
+after dry-run guardrails and data-cache preflight pass.

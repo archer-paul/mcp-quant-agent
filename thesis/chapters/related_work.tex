@@ -1,0 +1,82 @@
+\chapter{Related Work}
+\label{ch:related}
+
+We organise related work around the thesis's two contributions. \Cref{sec:rwbench} reviews
+the evaluation benchmarks that define the methodological standard the thesis must meet;
+\cref{sec:rwagents} reviews the multi-agent trading frameworks whose architecture we adopt
+and adapt; and \cref{sec:rwpos} states our position relative to both.
+
+\section{Evaluation benchmarks: the methodological standard}
+\label{sec:rwbench}
+
+\paragraph{StockBench.} StockBench~\cite{stockbench2025} is the closest published setup to
+ours: a contamination-free benchmark in which LLM agents make sequential buy/sell/hold
+decisions in realistic multi-month equity environments with daily prices, fundamentals, and
+news. We borrow its contamination-free framing and its return-plus-risk metric set, and its
+equity-centric design makes it directly comparable to our primary US-equities track. Where we
+extend it is on the reasoning axis: StockBench evaluates the \emph{actions} an agent takes,
+whereas our central addition is to evaluate the \emph{chain-of-thought} behind them ---
+faithfulness and grounding --- and to do so by regime.
+
+\paragraph{LiveTradeBench.} LiveTradeBench~\cite{livetradebench2025} evaluates many LLMs in a
+real-time window with a fixed lookback to prevent leakage. Two findings are load-bearing for
+this thesis. First, general LLM leaderboard scores barely correlate with trading returns,
+which justifies building a trading-specific evaluation rather than trusting generic
+capability scores. Second, the large cross-regime generalisation gaps it reports motivate our
+regime-segmented protocol directly. Our \mcp-as-time-machine design can be read as
+generalising LiveTradeBench's fixed-lookback idea from a single global window to a per-tool,
+per-timestamp filter that holds identically in backtest and live.
+
+\paragraph{KellyBench.} KellyBench~\cite{kellybench2026} is the methodological guardrail. In a
+long-horizon sequential-decision setting it documents that every frontier model loses money
+on average and catalogues the precise failure modes a rigorous study must avoid: the
+knowledge--action gap (a sizing rule coded but never invoked), non-stationarity, label
+leakage from fitting on the full training set before the split, premature termination, and
+single-seed unreliability. It also introduces a multi-point sophistication rubric. Our design
+is a point-by-point response: faithfulness and grounding target the knowledge--action gap;
+the \tnow\ filter and unadjusted prices target leakage; multi-seed evaluation with bootstrap
+intervals targets single-seed unreliability; pre-registration of the faithfulness metric
+targets post-hoc metric tuning; and our sophistication rubric is modelled on theirs. We cite
+it heavily in the methodology and rigour sections.
+
+\section{Multi-agent trading frameworks}
+\label{sec:rwagents}
+
+\paragraph{TradingAgents.} \textsc{TradingAgents}~\cite{tradingagents2024} is the reference
+multi-agent ``firm'': fundamental, sentiment, and technical analysts; Bull and Bear
+researchers in debate; a trader; and a risk team. We reuse its role decomposition and, in
+particular, its Bull/Bear debate pattern --- the structure where a cyclic graph framework
+genuinely pays off --- but adopt only the communication \emph{contract}, re-implementing it
+over our \mcp\ tool layer rather than importing its code, so that our temporal filter, decision
+schema, and evaluation plumbing remain in force. Our differentiator from it is exactly the two
+contributions of this thesis: the \mcp\ tool layer with its structural look-ahead guarantee,
+and the regime-aware reasoning evaluation.
+
+\paragraph{Agent Market Arena.} AMA~\cite{ama2025} compares several agent designs across
+several backbones in a live benchmark and reports that agent architecture drives behaviour
+more than the model backbone does. This justifies two of our choices: comparing single-agent
+against multi-agent architectures rather than sweeping many backbones, and treating the
+multi-agent extension as a test of behavioural change rather than an assumed improvement.
+
+\paragraph{ATLAS.} ATLAS~\cite{atlas2025} combines dynamic prompt optimisation with
+multi-agent coordination and reports that its gains concentrate in \emph{volatile} regimes.
+This directly supports our regime axis and the hypothesis that reasoning quality and strategy
+must adapt to volatility; it is a useful contrast in that our contribution is to \emph{measure}
+regime-dependent reasoning quality rather than to optimise prompts for it.
+
+\paragraph{HedgeAgents and FinCon.} HedgeAgents~\cite{hedgeagents2025} (a central fund manager
+coordinating asset-class experts via ``conferences'') and FinCon~\cite{fincon2024}
+(hierarchical manager--analyst communication with risk control) inform the hierarchy of our
+Portfolio-Manager extension, but we keep that extension deliberately narrow, consistent with
+the evaluation-first priority.
+
+\section{Positioning}
+\label{sec:rwpos}
+
+The reference architecture for multi-agent trading already exists; merely reproducing it would
+add little. Our angle is orthogonal and matches the thesis topic precisely: a standardised
+\mcp\ tool layer that makes look-ahead structurally impossible and an equivalent backtest/live
+interface, combined with a regime-segmented evaluation of \emph{reasoning} quality
+(faithfulness, grounding, sophistication) anchored to human judgement. Where prior benchmarks
+evaluate what an agent \emph{does}, we additionally evaluate whether it does what it
+\emph{says}, and we make the apparatus that measures this the primary object of study.

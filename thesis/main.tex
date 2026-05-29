@@ -1,0 +1,73 @@
+% =====================================================================
+% main.tex — master file for the MSc thesis
+%   "Autonomous Trading Agents via the Model Context Protocol"
+%
+% Compilation (see README.md):
+%   pdflatex main      % 1st pass — writes .aux, figure refs
+%   biber   main       % resolves references.bib via biblatex/biber
+%   pdflatex main      % 2nd pass — fills citations
+%   pdflatex main      % 3rd pass — settles cleveref/hyperref refs
+%
+% All not-yet-final result numbers are macros defined in
+% results/numbers.tex; the body never hard-codes a number.
+% =====================================================================
+\documentclass[11pt,a4paper,oneside]{report}
+
+\input{preamble}
+\input{results/numbers}   % centralised result-number macros (mostly \TODO)
+
+% ---------------------------------------------------------------------
+\begin{document}
+
+% ---- Front matter ---------------------------------------------------
+\begin{titlepage}
+  \centering
+  \vspace*{1.5cm}
+  {\scshape\large Imperial College London\par}
+  {\scshape Department of Mathematics --- MSc in Mathematics and Finance\par}
+  \vspace{2.2cm}
+  {\huge\bfseries Autonomous Trading Agents via the\\[0.3em] Model Context Protocol\par}
+  \vspace{1.0cm}
+  {\large A regime-aware harness for evaluating the reasoning of\\
+   tool-using large language model trading agents\par}
+  \vspace{2.4cm}
+  {\large\itshape Paul Archer\par}
+  \vspace{0.6cm}
+  {\large Supervisor: Dr Cristopher Salvi\par}
+  \vfill
+  {\large A thesis submitted in partial fulfilment of the requirements\\
+   for the degree of MSc in Mathematics and Finance\par}
+  \vspace{0.8cm}
+  {\large \today\par}
+\end{titlepage}
+
+\pagenumbering{roman}
+
+\input{frontmatter/abstract}
+\input{frontmatter/declaration}
+
+\tableofcontents
+\listoffigures
+\listoftables
+\input{frontmatter/glossary}
+
+\cleardoublepage
+\pagenumbering{arabic}
+
+% ---- Body -----------------------------------------------------------
+\input{chapters/introduction}
+\input{chapters/related_work}
+\input{chapters/methodology}
+\input{chapters/architecture}
+\input{chapters/evaluation}
+\input{chapters/results}
+\input{chapters/discussion}
+\input{chapters/conclusion}
+
+% ---- Back matter ----------------------------------------------------
+\printbibliography[heading=bibintoc]
+
+\appendix
+\input{chapters/appendix}
+
+\end{document}

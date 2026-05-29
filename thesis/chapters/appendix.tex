@@ -1,0 +1,47 @@
+\chapter{Reproducibility and Artifacts}
+\label{app:repro}
+
+This appendix records the artifacts and commands needed to reproduce the results, so that a
+reader (or examiner) can re-run the evaluation offline. All paths are relative to the
+repository root.
+
+\section{Code map}
+
+\begin{table}[h]
+  \centering
+  \caption{Where each methodological component lives in the codebase.}
+  \begin{tabularx}{\linewidth}{@{}lX@{}}
+    \toprule
+    Component & Path \\
+    \midrule
+    Simulation clock (\cref{inv:nolookahead}) & \file{src/.../clock.py} \\
+    Anti-look-ahead tests & \file{tests/test\_clock\_no\_lookahead.py}, \file{tests/test\_data\_temporal\_filter.py} \\
+    Data-sanity gate & \file{src/.../mcp\_servers/data/bar\_validation.py} \\
+    Regime detector & \file{src/.../mcp\_servers/analytics/regime.py} \\
+    Baselines (shifted, costed) & \file{src/.../backtest/baselines.py} \\
+    Financial metrics + bootstrap & \file{src/.../eval/financial.py} \\
+    Reasoning metrics (faithfulness/grounding) & \file{src/.../eval/reasoning.py} \\
+    Single-agent orchestrator & \file{src/.../agents/orchestrator.py} \\
+    PM multi-agent backbone & \file{src/.../agents/pm\_backbone.py} \\
+    Decision log + tiers & \file{src/.../backtest/engine.py}, \file{tier.py} \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{Filling the result numbers}
+
+Every number in \cref{ch:results} is a macro in \file{thesis/results/numbers.tex}. To produce
+the final document, replace each macro's \texttt{\textbackslash TODO\{\ldots\}} right-hand side with the value from the
+corresponding artifact (e.g.\ \file{results/<run-id>/summary.csv} for financial metrics,
+\file{faithfulness\_dual.csv} for the v1/v2 faithfulness table). The chapter sources must not
+be edited. Recompile per the README (\code{pdflatex} $\to$ \code{biber} $\to$ \code{pdflatex}
+$\times 2$).
+
+\section{Requested external captures}
+
+One figure is best provided as a real screenshot rather than a schematic: an annotated
+Langfuse span tree for a single PM decision (parent observation $\rightarrow$ analyst spans
+$\rightarrow$ debate spans $\rightarrow$ allocation), which would concretely illustrate the
+observability described in \cref{sec:observability}. \TODO{insert Langfuse PM span-tree
+screenshot for one representative date, cropped to show the parent$\rightarrow$analyst$\rightarrow$debate$\rightarrow$PM
+hierarchy and the news=unavailable marker.}
