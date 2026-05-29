@@ -142,7 +142,7 @@ def _simulate_nav(
     exec_signal: pd.Series,
     initial_cash: float,
     cost_per_trade: float = COST_PER_TRADE,
-) -> tuple[list[float], int, float]:
+) -> tuple[list[float], int, float, float, float]:
     """Simulate a strategy NAV given a pre-shifted execution signal.
 
     Parameters
@@ -159,10 +159,12 @@ def _simulate_nav(
 
     Returns
     -------
-    (nav_series, n_trades, daily_turnover)
+    (nav_series, n_trades, daily_turnover, total_commission, total_turnover)
         - ``nav_series``: list of floats (equity curve, same length as close)
         - ``n_trades``: number of position changes
         - ``daily_turnover``: mean absolute daily position change
+        - ``total_commission``: total commissions paid ($)
+        - ``total_turnover``: total notional traded ($)
     """
     daily_ret = close.pct_change()
 
@@ -182,7 +184,11 @@ def _simulate_nav(
 
     n_trades = int((pos_change > 0.0).sum())
     daily_turnover = float(pos_change.mean())
-    return nav.tolist(), n_trades, daily_turnover
+    # Commission estimate: each trade costs cost_per_trade × position notional.
+    # Use initial_cash as approximate average notional (conservative).
+    total_commission_est = float((pos_change * cost_per_trade * initial_cash).sum())
+    total_turnover_est = float(pos_change.sum() * initial_cash)
+    return nav.tolist(), n_trades, daily_turnover, total_commission_est, total_turnover_est
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +218,24 @@ def buy_and_hold(
     ``turnover``, ``strategy``.
     """
     close = df["close"]
-    # NAV = initial_cash × (close[t] / close[0])
-    nav_series = (initial_cash * close / close.iloc[0]).tolist()
-    metrics = compute_all_metrics(nav_series)
+    # B&H incurs two bookend trades: buy at bar 0, sell at bar -1.
+    # Deduct COST_PER_TRADE from NAV at entry (applied to initial_cash)
+    # and again at exit (applied to final notional).
+    raw_nav = (initial_cash * close / close.iloc[0])
+    # Apply entry cost as a NAV haircut: start after paying buy cost
+    entry_cost = initial_cash * COST_PER_TRADE
+    raw_nav = raw_nav * (1.0 - COST_PER_TRADE)  # entry cost baked in
+    nav_series = raw_nav.tolist()
+    nav_series[-1] *= (1.0 - COST_PER_TRADE)  # exit cost on last bar
+
+    total_commission = entry_cost + initial_cash * COST_PER_TRADE  # entry + exit
+    total_turnover = initial_cash * 2.0  # buy + sell full position
+
+    metrics = compute_all_metrics(
+        nav_series,
+        total_commission=total_commission,
+        total_turnover=total_turnover,
+    )
     sharpe_ci = bootstrap_sharpe_ci(nav_series)
     return {
         "strategy": "buy_and_hold",
@@ -266,8 +287,12 @@ def momentum_ts(
 
     raw_signal = _momentum_signal(close, lookback)
     exec_signal = raw_signal.shift(1).fillna(0.0)  # ← THE SHIFT: no same-day execution
-    nav_series, n_trades, turnover = _simulate_nav(close, exec_signal, initial_cash)
-    metrics = compute_all_metrics(nav_series)
+    nav_series, n_trades, turnover, total_comm, total_tv = _simulate_nav(
+        close, exec_signal, initial_cash
+    )
+    metrics = compute_all_metrics(
+        nav_series, total_commission=total_comm, total_turnover=total_tv
+    )
     return {
         "strategy": "momentum_ts",
         "nav_series": nav_series,
@@ -303,8 +328,12 @@ def mean_reversion_bb(
     close = df["close"]
     raw_signal = _bb_signal(close, window, num_std)
     exec_signal = raw_signal.shift(1).fillna(0.0)  # ← THE SHIFT
-    nav_series, n_trades, turnover = _simulate_nav(close, exec_signal, initial_cash)
-    metrics = compute_all_metrics(nav_series)
+    nav_series, n_trades, turnover, total_comm, total_tv = _simulate_nav(
+        close, exec_signal, initial_cash
+    )
+    metrics = compute_all_metrics(
+        nav_series, total_commission=total_comm, total_turnover=total_tv
+    )
     return {
         "strategy": "mean_reversion_bb",
         "nav_series": nav_series,

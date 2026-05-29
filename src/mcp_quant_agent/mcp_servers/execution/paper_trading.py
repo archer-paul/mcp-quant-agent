@@ -50,12 +50,19 @@ class Portfolio:
 
     State
     -----
-    - ``cash``          — available cash
-    - ``positions``     — current holdings: ticker → quantity
-    - ``cost_basis``    — weighted-average cost per share: ticker → price
-    - ``order_history`` — chronological list of fills
-    - ``nav_history``   — (timestamp, nav) tuples for equity-curve reconstruction
-    - ``initial_cash``  — for total-return computation
+    - ``cash``               — available cash
+    - ``positions``          — current holdings: ticker → quantity
+    - ``cost_basis``         — weighted-average cost per share: ticker → price
+    - ``order_history``      — chronological list of fills
+    - ``nav_history``        — (timestamp, nav) tuples for equity-curve reconstruction
+    - ``initial_cash``       — for total-return computation
+    - ``commission_bps``     — one-way transaction cost in basis points (applies to
+                               both buys and sells, deducted from cash).  Set to 0
+                               for cost-free mode (legacy behaviour).  The canonical
+                               value is 10 bps (5 commission + 5 slippage) to match
+                               the baselines in ``backtest/baselines.py``.
+    - ``total_commission``   — cumulative commissions paid (for cost-drag reporting)
+    - ``total_turnover``     — cumulative notional traded (for turnover reporting)
 
     All state resets on ``reset()`` or when a new ``Portfolio`` is created.
     No hidden global state — the portfolio is always passed explicitly.
@@ -67,6 +74,9 @@ class Portfolio:
     order_history: list[Fill] = field(default_factory=list)
     nav_history: list[dict[str, Any]] = field(default_factory=list)
     initial_cash: float = 100_000.0
+    commission_bps: float = 0.0  # one-way cost; 10 bps = 5 comm + 5 slippage
+    total_commission: float = field(default=0.0, init=False)
+    total_turnover: float = field(default=0.0, init=False)
 
     def reset(self, initial_cash: float = 100_000.0) -> None:
         """Reset the portfolio to a clean state for a new backtest run."""
@@ -76,6 +86,8 @@ class Portfolio:
         self.cost_basis = {}
         self.order_history = []
         self.nav_history = []
+        self.total_commission = 0.0
+        self.total_turnover = 0.0
 
     # ── orders ────────────────────────────────────────────────────────────────
 
@@ -123,6 +135,7 @@ class Portfolio:
             raise ValueError(f"price must be positive, got {price}")
 
         notional = round(quantity * price, 4)
+        commission = round(notional * self.commission_bps / 10_000.0, 4)
 
         if simulation_time is None:
             try:
@@ -133,17 +146,19 @@ class Portfolio:
                 simulation_time = dt.datetime.utcnow().isoformat()
 
         if side == "buy":
-            if notional > self.cash:
+            total_cost = notional + commission
+            if total_cost > self.cash:
                 raise ValueError(
-                    f"Insufficient cash: need ${notional:,.2f}, "
-                    f"have ${self.cash:,.2f}. "
+                    f"Insufficient cash: need ${total_cost:,.2f} "
+                    f"(${notional:,.2f} notional + ${commission:,.2f} commission at "
+                    f"{self.commission_bps:.0f} bps), have ${self.cash:,.2f}. "
                     "Reduce quantity or check portfolio state."
                 )
-            self.cash -= notional
+            self.cash -= notional + commission
             prev_qty = self.positions.get(ticker, 0.0)
             prev_cost = self.cost_basis.get(ticker, 0.0)
             new_qty = prev_qty + quantity
-            # Weighted-average cost basis
+            # Weighted-average cost basis (excludes commission — that hits cash directly)
             self.cost_basis[ticker] = (
                 (prev_cost * prev_qty + price * quantity) / new_qty
                 if new_qty > 0
@@ -158,16 +173,16 @@ class Portfolio:
                     f"Cannot sell {quantity:.2f} shares of {ticker}: "
                     f"only holding {held:.2f}."
                 )
-            self.cash += notional
+            self.cash += notional - commission  # commission deducted from proceeds
             new_qty = held - quantity
             if new_qty < 1e-9:  # treat as fully closed
                 self.positions.pop(ticker, None)
                 self.cost_basis.pop(ticker, None)
             else:
                 self.positions[ticker] = new_qty
-                # Cost basis unchanged on sell (FIFO would be more accurate
-                # but weighted avg is simpler and sufficient for Sharpe/Calmar)
 
+        self.total_commission = round(self.total_commission + commission, 4)
+        self.total_turnover = round(self.total_turnover + notional, 4)
         fill = Fill(
             timestamp=simulation_time,
             ticker=ticker,
@@ -175,6 +190,7 @@ class Portfolio:
             quantity=quantity,
             price=price,
             notional=notional,
+            commission=commission,
         )
         self.order_history.append(fill)
         return fill
@@ -266,6 +282,9 @@ class Portfolio:
             "nav": nav,
             "total_return_pct": round((nav / self.initial_cash - 1.0) * 100.0, 4),
             "num_trades": len(self.order_history),
+            "total_commission": round(self.total_commission, 4),
+            "total_turnover": round(self.total_turnover, 4),
+            "commission_bps": self.commission_bps,
         }
 
     def get_order_history(self) -> list[dict[str, Any]]:

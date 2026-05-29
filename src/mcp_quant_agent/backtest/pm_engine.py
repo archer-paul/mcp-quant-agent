@@ -40,6 +40,7 @@ class PMBacktestEngine:
         use_llm_cache: bool = True,
         smoke_guard: Any | None = None,
         pm_backbone: Any | None = None,
+        transaction_cost_bps: float | None = None,
     ) -> None:
         self.tickers = [ticker.upper() for ticker in tickers]
         self.start_date = start_date
@@ -58,6 +59,10 @@ class PMBacktestEngine:
         self.smoke_guard = smoke_guard
         self.pm_backbone = pm_backbone
         self._price_sources: dict[str, str] = {}
+        if transaction_cost_bps is None:
+            from mcp_quant_agent.config import settings
+            transaction_cost_bps = settings.transaction_cost_bps
+        self.transaction_cost_bps = transaction_cost_bps
 
         if run_id is None:
             label = "pm_stub" if use_stub else "pm_api_smoke"
@@ -97,7 +102,11 @@ class PMBacktestEngine:
 
         clock = SimulationClock(self.start_date)
         set_clock(clock)
-        portfolio = Portfolio(cash=self.initial_cash, initial_cash=self.initial_cash)
+        portfolio = Portfolio(
+            cash=self.initial_cash,
+            initial_cash=self.initial_cash,
+            commission_bps=self.transaction_cost_bps,
+        )
         price_data = self._load_price_data()
         pm_backbone = None
         if not self.use_stub:
@@ -428,7 +437,14 @@ class PMBacktestEngine:
         else:
             logger.info("PM run %s: 0 pm_api_error decisions.", self.run_id)
 
-        metrics = compute_all_metrics(nav_series) if len(nav_series) > 1 else {}
+        metrics = (
+            compute_all_metrics(
+                nav_series,
+                total_commission=portfolio.total_commission,
+                total_turnover=portfolio.total_turnover,
+            )
+            if len(nav_series) > 1 else {}
+        )
         sharpe_ci = bootstrap_sharpe_ci(nav_series) if len(nav_series) > 10 else {}
 
         backbone_label = "pm_stub" if self.use_stub else model

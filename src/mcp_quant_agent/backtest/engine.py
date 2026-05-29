@@ -90,6 +90,7 @@ class BacktestEngine:
         use_llm_cache: bool = True,
         run_id: str | None = None,
         concurrency: int = 15,
+        transaction_cost_bps: float | None = None,
     ) -> None:
         self.tickers = tickers
         self.start_date = start_date
@@ -99,6 +100,12 @@ class BacktestEngine:
         self.use_stub = use_stub
         self.use_llm_cache = use_llm_cache
         self.concurrency = concurrency
+        # Default to settings value so all runs share the same cost assumption.
+        # Pass 0.0 explicitly only in legacy tests that pre-date cost tracking.
+        if transaction_cost_bps is None:
+            from mcp_quant_agent.config import settings
+            transaction_cost_bps = settings.transaction_cost_bps
+        self.transaction_cost_bps = transaction_cost_bps
         # Run ID: used for output file paths.  Auto-generated if not provided.
         if run_id is None:
             backbone_label = "stub" if use_stub else model.replace(".", "-")
@@ -163,7 +170,11 @@ class BacktestEngine:
         # ── 2. Set up clock and portfolio ─────────────────────────────────────
         clock = SimulationClock(self.start_date)
         set_clock(clock)
-        portfolio = Portfolio(cash=self.initial_cash, initial_cash=self.initial_cash)
+        portfolio = Portfolio(
+            cash=self.initial_cash,
+            initial_cash=self.initial_cash,
+            commission_bps=self.transaction_cost_bps,
+        )
 
         # ── 3. Pre-fetch price data (with warm-up window) ────────────────────
         # CRITICAL: fetch warm-up bars BEFORE the backtest window and write
@@ -524,7 +535,14 @@ class BacktestEngine:
             logger.info("Decisions written to %s (%d entries)", jsonl_path, len(all_entries))
 
         # ── 8. Compute metrics ────────────────────────────────────────────────
-        metrics = compute_all_metrics(nav_series) if len(nav_series) > 1 else {}
+        metrics = (
+            compute_all_metrics(
+                nav_series,
+                total_commission=portfolio.total_commission,
+                total_turnover=portfolio.total_turnover,
+            )
+            if len(nav_series) > 1 else {}
+        )
         sharpe_ci = bootstrap_sharpe_ci(nav_series) if len(nav_series) > 10 else {}
 
         backbone_label = "stub" if self.use_stub else self.model

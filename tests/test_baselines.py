@@ -137,27 +137,39 @@ class TestSignalShift:
 
 
 class TestBuyAndHold:
-    def test_nav_equals_price_ratio(self) -> None:
-        """BnH NAV[t] = initial_cash × close[t] / close[0]."""
+    def test_nav_equals_price_ratio_with_costs(self) -> None:
+        """BnH NAV[t] = initial_cash × (1-COST_PER_TRADE) × close[t] / close[0].
+
+        Transaction costs are applied: entry cost at bar 0, exit cost at bar -1.
+        The mid-series bars have the entry haircut but not the exit haircut.
+        """
+        from mcp_quant_agent.backtest.baselines import COST_PER_TRADE
         closes = [100.0, 105.0, 95.0, 110.0, 108.0]
         df = _make_df(closes)
         result = buy_and_hold(df, initial_cash=10_000.0)
         nav = result["nav_series"]
-        for i, (close, nav_val) in enumerate(zip(closes, nav, strict=True)):
-            expected = 10_000.0 * close / closes[0]
+        # All bars except last: only entry cost (1 - COST_PER_TRADE)
+        for i, (close, nav_val) in enumerate(zip(closes[:-1], nav[:-1], strict=True)):
+            expected = 10_000.0 * (1.0 - COST_PER_TRADE) * close / closes[0]
             assert abs(nav_val - expected) < 0.01, (
                 f"NAV mismatch at bar {i}: expected {expected:.2f}, got {nav_val:.2f}"
             )
+        # Last bar: entry + exit cost
+        expected_last = 10_000.0 * (1.0 - COST_PER_TRADE) ** 2 * closes[-1] / closes[0]
+        assert abs(nav[-1] - expected_last) < 0.01
 
     def test_nav_length_matches_input(self) -> None:
         df = _make_df([100.0] * 30)
         result = buy_and_hold(df)
         assert len(result["nav_series"]) == 30
 
-    def test_initial_nav_equals_initial_cash(self) -> None:
+    def test_initial_nav_below_initial_cash_by_entry_cost(self) -> None:
+        """After paying entry cost, first bar NAV < initial_cash."""
+        from mcp_quant_agent.backtest.baselines import COST_PER_TRADE
         df = _make_df([100.0, 105.0, 110.0])
         result = buy_and_hold(df, initial_cash=50_000.0)
-        assert result["nav_series"][0] == pytest.approx(50_000.0)
+        expected = 50_000.0 * (1.0 - COST_PER_TRADE)
+        assert result["nav_series"][0] == pytest.approx(expected)
 
     def test_n_trades_is_two(self) -> None:
         df = _make_df([100.0] * 10)
@@ -224,7 +236,7 @@ class TestMomentum:
         close_series = df["close"]
         raw = _momentum_signal(close_series, lookback=5)
         exec_sig = raw.shift(1).fillna(0.0)
-        nav_no_cost, _, _ = _simulate_nav(
+        nav_no_cost, _, _, _, _ = _simulate_nav(
             close_series, exec_sig, 100_000.0, cost_per_trade=0.0
         )
 

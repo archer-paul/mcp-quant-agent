@@ -1,27 +1,29 @@
 #!/usr/bin/env python
 """Bounded single-agent real-LLM run + full eval pipeline.
 
-Guardrails (non-negotiable):
-  - Requires --acknowledge-cost for real OpenAI runs.
-  - Hard limit: max 3 tickers AND max 10 dates (enforced before any LLM call).
-  - LLM cache ON by default (repeat runs cost $0 on cached prompts).
-  - Displays token count + estimated cost after the run.
-  - All results explicitly labelled "smoke-scale, not thesis-final".
+Tiers (--tier flag):
+  smoke   — max 3 tickers × 5 dates (default; no --acknowledge-cost needed)
+  medium  — max 3 tickers × 22 dates (~1 month; requires --acknowledge-cost)
+  full    — unrestricted; requires --acknowledge-cost
 
-This is the canonical script for producing real-LLM eval tables on bounded
-windows during thesis development.  The full 2-year run uses run_thesis_backtest.py.
+Guardrails:
+  - Requires --acknowledge-cost for medium/full tiers.
+  - LLM cache ON by default (repeat runs cost $0 on cached prompts).
+  - Transaction costs ON by default (10 bps = settings.transaction_cost_bps).
+  - All results labelled with tier name ("smoke-scale", "medium-scale", etc.).
 
 Usage examples:
-  # Bear window A (5 dates, 3 tickers):
+  # Smoke (default tier, no cost ack needed):
   python scripts/run_bounded_eval.py --tickers AAPL --tickers MSFT --tickers NVDA \\
-      --start 2023-01-03 --end 2023-01-09 --acknowledge-cost
+      --start 2023-01-03 --end 2023-01-09
 
-  # Bull window B (5 dates):
+  # Medium (~1 month, regime transition):
   python scripts/run_bounded_eval.py --tickers AAPL --tickers MSFT --tickers NVDA \\
-      --start 2023-06-05 --end 2023-06-09 --acknowledge-cost
+      --start 2023-01-03 --end 2023-01-31 --tier medium --acknowledge-cost
 
   # Dry-run check only (no API calls):
-  python scripts/run_bounded_eval.py --tickers AAPL --start 2023-01-03 --end 2023-01-09 --dry-run
+  python scripts/run_bounded_eval.py --tickers AAPL --start 2023-01-03 --end 2023-01-31 \\
+      --tier medium --dry-run
 """
 
 from __future__ import annotations
@@ -38,9 +40,6 @@ import typer
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Hard budget guards
-_MAX_TICKERS = 3
-_MAX_DATES = 10
 _APPROX_COST_PER_DECISION_USD = 0.00015  # gpt-4.1-mini ~0.15¢ per decision
 
 app = typer.Typer(add_completion=False)
@@ -74,14 +73,15 @@ def _print_eval_table(label: str, metrics: dict[str, Any]) -> None:
 
 @app.command()
 def main(
-    tickers: list[str] = typer.Option(..., help="Ticker universe (max 3)."),
+    tickers: list[str] = typer.Option(..., help="Ticker universe (max per tier)."),
     start: str = typer.Option(..., help="Start date ISO-8601."),
     end: str = typer.Option(..., help="End date ISO-8601."),
+    tier: str = typer.Option("smoke", help="Tier: smoke | medium | full."),
     model: str = typer.Option("gpt-4.1-mini", help="OpenAI model."),
     initial_cash: float = typer.Option(100_000.0),
     acknowledge_cost: bool = typer.Option(
         False, "--acknowledge-cost",
-        help="Required for real LLM runs.",
+        help="Required for medium/full tiers.",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run",
@@ -97,35 +97,42 @@ def main(
     ),
     label: str = typer.Option(
         "",
-        help="Optional label for this run (e.g. 'bear-window-A').",
+        help="Optional label for this run.",
     ),
     output_root: Path = typer.Option(Path("."), help="Root for runs/ and results/."),
 ) -> None:
     """Bounded single-agent real-LLM run + full eval pipeline."""
-    # ── Guardrail checks ─────────────────────────────────────────────────────
+    from mcp_quant_agent.backtest.tier import TierName, validate_tier
+
+    # ── Tier validation ───────────────────────────────────────────────────────
     tickers = [t.strip().upper() for t in tickers if t.strip()]
-    if len(tickers) > _MAX_TICKERS:
-        typer.echo(f"FATAL: max {_MAX_TICKERS} tickers, got {len(tickers)}", err=True)
-        raise typer.Exit(1)
     if not tickers:
         typer.echo("FATAL: must specify at least one ticker", err=True)
         raise typer.Exit(1)
+    if tier not in ("smoke", "medium", "full"):
+        typer.echo(f"FATAL: --tier must be smoke | medium | full, got {tier!r}", err=True)
+        raise typer.Exit(1)
+    tier_name: TierName = tier  # type: ignore[assignment]
 
     n_dates = _count_trading_dates(start, end)
-    if n_dates > _MAX_DATES:
-        typer.echo(
-            f"FATAL: max {_MAX_DATES} trading dates in this script, "
-            f"got ~{n_dates} ({start}→{end}). Use run_thesis_backtest.py for full runs.",
-            err=True,
+    try:
+        validate_tier(
+            tier_name,
+            n_tickers=len(tickers),
+            n_trading_dates=n_dates,
+            acknowledge_cost=acknowledge_cost or dry_run,
         )
-        raise typer.Exit(1)
+    except ValueError as exc:
+        typer.echo(f"FATAL: {exc}", err=True)
+        raise typer.Exit(1) from exc
 
     max_decisions = len(tickers) * n_dates
     est_cost = max_decisions * _APPROX_COST_PER_DECISION_USD
 
-    typer.echo("\n=== BOUNDED EVAL RUN ===")
+    typer.echo(f"\n=== {tier.upper()}-SCALE EVAL RUN ===")
     typer.echo(f"  tickers  : {', '.join(tickers)}")
     typer.echo(f"  window   : {start} -> {end}  (~{n_dates} trading dates)")
+    typer.echo(f"  tier     : {tier}")
     typer.echo(f"  model    : {model}")
     typer.echo(f"  cache    : {'ON (repeat runs free)' if not no_cache else 'OFF'}")
     typer.echo(f"  max_decisions (guard): {max_decisions}")
@@ -134,15 +141,10 @@ def main(
         typer.echo(f"  label    : {label}")
 
     if dry_run:
-        typer.echo("\n[DRY RUN] Guardrail check passed. No API calls made.")
+        typer.echo(f"\n[DRY RUN] Tier '{tier}' guardrail check passed. No API calls made.")
         return
 
-    if not acknowledge_cost:
-        typer.echo(
-            "\nFATAL: pass --acknowledge-cost to confirm you accept OpenAI spend.",
-            err=True,
-        )
-        raise typer.Exit(1)
+    # validate_tier already checked acknowledge_cost for non-smoke tiers.
 
     # ── Run the backtest ──────────────────────────────────────────────────────
     from mcp_quant_agent.backtest.engine import BacktestEngine
@@ -185,8 +187,9 @@ def main(
     # Financial metrics
     metrics = results.get("metrics", {})
     sharpe_ci = results.get("sharpe_ci", {})
-    typer.echo(f"\n[FINANCIAL — smoke-scale, NOT thesis-final]")
+    typer.echo(f"\n[FINANCIAL — {tier}-scale, NOT thesis-final]")
     typer.echo(f"  run_id         = {run_id}")
+    typer.echo(f"  tier           = {tier}")
     typer.echo(f"  n_decisions    = {n_decisions}  (guard: {max_decisions})")
     typer.echo(f"  AnnReturn      = {metrics.get('annualised_return', 0)*100:+.1f}%")
     typer.echo(f"  Sharpe         = {metrics.get('sharpe', 0):.3f}")
@@ -194,6 +197,8 @@ def main(
     ci_hi = sharpe_ci.get("ci_upper", 0)
     typer.echo(f"  Sharpe CI      = [{ci_lo:.3f}, {ci_hi:.3f}]")
     typer.echo(f"  MaxDD          = {metrics.get('max_drawdown', 0)*100:.1f}%")
+    typer.echo(f"  cost_drag_bps  = {metrics.get('cost_drag_bps', 0):.2f}")
+    typer.echo(f"  turnover_pct   = {metrics.get('turnover_pct', 0):.2f}%")
 
     # Action distribution
     actions = [d.get("action", "hold") for d in decisions]

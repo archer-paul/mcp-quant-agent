@@ -73,6 +73,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Transaction costs ─────────────────────────────────────────────────────
+    transaction_cost_bps: float = Field(
+        default=10.0,
+        description=(
+            "One-way transaction cost in basis points applied to every buy and sell. "
+            "10 bps = 5 bps commission + 5 bps slippage, matching baselines.py. "
+            "Must be identical for agent AND baselines for a fair comparison."
+        ),
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

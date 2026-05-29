@@ -214,6 +214,8 @@ def compute_all_metrics(
     nav_series: list[float],
     risk_free_rate: float = 0.0,
     trading_days: int = 252,
+    total_commission: float = 0.0,
+    total_turnover: float = 0.0,
 ) -> dict[str, float]:
     """Compute the full metric suite for a given NAV series.
 
@@ -225,12 +227,22 @@ def compute_all_metrics(
         Annual risk-free rate for Sharpe/Sortino (default 0).
     trading_days:
         Trading days per year (default 252).
+    total_commission:
+        Total commissions paid during the run (from Portfolio.total_commission).
+        Used to compute cost_drag_bps.
+    total_turnover:
+        Total notional traded during the run (from Portfolio.total_turnover).
+        Used to compute turnover_pct.
 
     Returns
     -------
     dict[str, float]
-        ``{annualised_return, sharpe, sortino, calmar, max_drawdown, hit_rate}``.
+        ``{annualised_return, sharpe, sortino, calmar, max_drawdown, hit_rate,
+        cost_drag_bps, turnover_pct}``.
     """
+    initial_nav = nav_series[0] if nav_series else 1.0
+    cost_drag_bps = (total_commission / initial_nav) * 10_000.0 if initial_nav > 0 else 0.0
+    turnover_pct = (total_turnover / initial_nav) * 100.0 if initial_nav > 0 else 0.0
     return {
         "annualised_return": annualised_return(nav_series, trading_days),
         "sharpe": sharpe_ratio(nav_series, risk_free_rate, trading_days),
@@ -238,6 +250,8 @@ def compute_all_metrics(
         "calmar": calmar_ratio(nav_series, trading_days),
         "max_drawdown": max_drawdown(nav_series),
         "hit_rate": hit_rate(nav_series),
+        "cost_drag_bps": round(cost_drag_bps, 2),
+        "turnover_pct": round(turnover_pct, 2),
     }
 
 
