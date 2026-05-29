@@ -24,11 +24,55 @@ making the test fail.  An OpenAI-backed test would also pass (same cache key
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+def _make_price_rows(start: str, n: int, step: float = 1.0) -> list[dict[str, Any]]:
+    import datetime as dt
+
+    start_d = dt.date.fromisoformat(start)
+    rows = []
+    for i in range(n):
+        close = 100.0 + i * step
+        rows.append(
+            {
+                "date": (start_d + dt.timedelta(days=i)).isoformat(),
+                "open": close - 0.1,
+                "high": close + 0.5,
+                "low": close - 0.5,
+                "close": close,
+                "volume": 1_000_000,
+            }
+        )
+    return rows
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _offline_market_data() -> None:
+    """Keep async-engine tests hermetic; no yfinance/Finnhub network calls."""
+    monkeypatch = pytest.MonkeyPatch()
+    rows_by_ticker = {
+        "AAPL": _make_price_rows("2021-11-09", 600, step=0.25),
+        "MSFT": _make_price_rows("2021-11-09", 600, step=0.35),
+    }
+
+    def fake_fetch(ticker: str, start: str, end: str, _interval: str) -> list[dict[str, Any]]:
+        rows = rows_by_ticker.get(ticker.upper(), rows_by_ticker["AAPL"])
+        return [row for row in rows if start <= str(row["date"]) < end]
+
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.yfinance_source._fetch_raw_bars",
+        fake_fetch,
+    )
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.finnhub_source.get_news_items",
+        lambda *_args, **_kwargs: [],
+    )
+    yield
+    monkeypatch.undo()
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +181,7 @@ class TestDecisionsJsonlSorted:
     def test_jsonl_sorted(self, tmp_path: Path) -> None:
         from mcp_quant_agent.backtest.engine import BacktestEngine
 
-        engine = BacktestEngine(
+        BacktestEngine(
             tickers=["MSFT", "AAPL"],  # deliberately reversed
             start_date="2023-01-03",
             end_date="2023-01-10",
@@ -182,3 +226,68 @@ class TestConcurrencyBounds:
         # AAPL had bars on each trading day in that week
         assert results["n_decisions"] > 0
         assert results["n_decisions"] == len(results["decisions_all"])
+
+
+def test_single_agent_engine_reports_transaction_costs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from mcp_quant_agent.backtest.engine import BacktestEngine
+
+    rows = _make_price_rows("2021-11-09", 500, step=0.0)
+    for row in rows:
+        if str(row["date"]) >= "2023-01-10":
+            row["open"] = 129.0
+            row["high"] = 131.0
+            row["low"] = 128.0
+            row["close"] = 130.0
+
+    def fake_fetch(_ticker: str, start: str, end: str, _interval: str) -> list[dict[str, Any]]:
+        return [row for row in rows if start <= str(row["date"]) < end]
+
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.yfinance_source._fetch_raw_bars",
+        fake_fetch,
+    )
+
+    engine = BacktestEngine(
+        tickers=["AAPL"],
+        start_date="2023-01-03",
+        end_date="2023-01-20",
+        use_stub=True,
+        transaction_cost_bps=10.0,
+    )
+    results = engine.run()
+
+    assert results["metrics"]["cost_drag_bps"] > 0.0
+    assert results["metrics"]["turnover_pct"] > 0.0
+
+
+def test_single_agent_price_offline_blocks_fetch(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from mcp_quant_agent.backtest.engine import BacktestEngine
+    from mcp_quant_agent.mcp_servers.data.cache import PriceCache
+
+    cache = PriceCache(cache_dir=tmp_path)
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.yfinance_source._get_cache",
+        lambda: cache,
+    )
+    fetch_calls = {"n": 0}
+
+    def fake_fetch(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+        fetch_calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.yfinance_source._fetch_raw_bars",
+        fake_fetch,
+    )
+
+    engine = BacktestEngine(
+        tickers=["AAPL"],
+        start_date="2023-01-03",
+        end_date="2023-01-20",
+        use_stub=True,
+        price_offline=True,
+    )
+
+    with pytest.raises(RuntimeError, match="price_offline=True forbids API fetch"):
+        engine.run()
+    assert fetch_calls["n"] == 0

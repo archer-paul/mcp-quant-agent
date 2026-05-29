@@ -446,6 +446,24 @@ def run_all_baselines(
                     for i in range(min_len)
                 ]
                 eq_metrics = compute_all_metrics(avg_nav)
+                eq_metrics["cost_drag_bps"] = round(
+                    sum(
+                        per_ticker[t][strategy_name]["metrics"].get("cost_drag_bps", 0.0)
+                        for t in valid_tickers
+                        if strategy_name in per_ticker[t]
+                    )
+                    / max(len(nav_lists), 1),
+                    2,
+                )
+                eq_metrics["turnover_pct"] = round(
+                    sum(
+                        per_ticker[t][strategy_name]["metrics"].get("turnover_pct", 0.0)
+                        for t in valid_tickers
+                        if strategy_name in per_ticker[t]
+                    )
+                    / max(len(nav_lists), 1),
+                    2,
+                )
                 eq_ci = bootstrap_sharpe_ci(avg_nav)
                 equal_weight[strategy_name] = {
                     "strategy": strategy_name,

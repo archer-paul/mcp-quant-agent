@@ -134,7 +134,7 @@ def _to_datetime(ts: DateLike) -> dt.datetime:
             # timestamp — e.g. 2022-06-16T08:00+09:00 is actually
             # 2022-06-15T23:00 UTC, but a bare replace gives 2022-06-16T08:00,
             # making it look like a future date when it is actually past.
-            return ts.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            return ts.astimezone(dt.UTC).replace(tzinfo=None)
         # Naive datetime: treat as UTC (already in the correct reference frame).
         return ts
     if isinstance(ts, dt.date):

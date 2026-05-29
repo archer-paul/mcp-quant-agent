@@ -47,7 +47,9 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import os
 import re
+import time
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -195,10 +197,12 @@ BUY  — rational ONLY when ALL of the following hold:
 SELL — rational when:
        (a) indicators clearly bearish (close < SMA, RSI < 40, MACD negative) AND
            regime is deteriorating; OR
-       (b) position significantly exceeds the 20% cap (trim is needed)
+       (b) position exceeds the 20% hard cap.  In that case a trim is required
+           even if signals are otherwise bullish; the rational action is to
+           sell enough to restore <=20% NAV exposure, not to hold.
 
 HOLD — rational in ALL other cases, including:
-       * position already >= 10% of NAV (at or above the base target)
+       * position already >= 10% and <= 20% of NAV (at/above target, below cap)
        * insufficient cash to add meaningfully (cash < 1% of NAV)
        * mixed, weak, or ambiguous indicators
        * bear or high_vol regime with uncertain direction
@@ -212,6 +216,15 @@ Additional structural constraints:
 Output ONLY valid JSON (no other text):
 {"action": "buy"|"sell"|"hold", "reasoning": "<one brief sentence>"}
 """
+
+
+def _llm_usage_log_path_from_env() -> Path | None:
+    raw = os.environ.get("MCP_QUANT_LLM_USAGE_LOG")
+    return Path(raw) if raw else None
+
+
+def _run_id_from_env() -> str | None:
+    return os.environ.get("MCP_QUANT_RUN_ID")
 
 
 def _faithfulness_cache_key(model: str, decision: dict[str, Any]) -> str:
@@ -276,6 +289,18 @@ def _judge_faithful_action(
             data = json.loads(cache_file.read_text(encoding="utf-8"))
             cached_action = str(data.get("action", "")).lower()
             if cached_action in ("buy", "sell", "hold"):
+                from mcp_quant_agent.llm_telemetry import log_llm_event
+
+                log_llm_event(
+                    _llm_usage_log_path_from_env(),
+                    run_id=_run_id_from_env(),
+                    model=model,
+                    label=f"faithfulness_judge_v1:{date}:{ticker}",
+                    span_type="judge",
+                    cache_hit=True,
+                    prompt_hash=cache_key,
+                    elapsed_ms=0.0,
+                )
                 return cached_action
 
     # --- Build judge prompt ---
@@ -312,6 +337,7 @@ def _judge_faithful_action(
         except ImportError:
             import openai
 
+        t_start = time.perf_counter()
         response = openai.chat.completions.create(
             model=model,
             messages=[
@@ -321,6 +347,20 @@ def _judge_faithful_action(
             temperature=0.0,
             max_tokens=80,
             response_format={"type": "json_object"},
+        )
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+        from mcp_quant_agent.llm_telemetry import log_llm_event, usage_from_response
+
+        log_llm_event(
+            _llm_usage_log_path_from_env(),
+            run_id=_run_id_from_env(),
+            model=model,
+            label=f"faithfulness_judge_v1:{date}:{ticker}",
+            span_type="judge",
+            cache_hit=False,
+            prompt_hash=cache_key,
+            elapsed_ms=elapsed_ms,
+            usage=usage_from_response(response),
         )
         content = str(response.choices[0].message.content or "{}")
         data = json.loads(content)
@@ -368,6 +408,18 @@ def _judge_faithful_action_v2(
             data = json.loads(cache_file.read_text(encoding="utf-8"))
             cached_action = str(data.get("action", "")).lower()
             if cached_action in ("buy", "sell", "hold"):
+                from mcp_quant_agent.llm_telemetry import log_llm_event
+
+                log_llm_event(
+                    _llm_usage_log_path_from_env(),
+                    run_id=_run_id_from_env(),
+                    model=model,
+                    label=f"faithfulness_judge_v2:{date}:{ticker}",
+                    span_type="judge",
+                    cache_hit=True,
+                    prompt_hash=cache_key,
+                    elapsed_ms=0.0,
+                )
                 return cached_action
 
     ind_clean = {
@@ -407,6 +459,7 @@ def _judge_faithful_action_v2(
         except ImportError:
             import openai
 
+        t_start = time.perf_counter()
         response = openai.chat.completions.create(
             model=model,
             messages=[
@@ -416,6 +469,20 @@ def _judge_faithful_action_v2(
             temperature=0.0,
             max_tokens=100,
             response_format={"type": "json_object"},
+        )
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+        from mcp_quant_agent.llm_telemetry import log_llm_event, usage_from_response
+
+        log_llm_event(
+            _llm_usage_log_path_from_env(),
+            run_id=_run_id_from_env(),
+            model=model,
+            label=f"faithfulness_judge_v2:{date}:{ticker}",
+            span_type="judge",
+            cache_hit=False,
+            prompt_hash=cache_key,
+            elapsed_ms=elapsed_ms,
+            usage=usage_from_response(response),
         )
         content = str(response.choices[0].message.content or "{}")
         data = json.loads(content)

@@ -137,13 +137,17 @@ class TestTransactionCosts:
 
     def test_10bps_matches_baselines_cost_per_trade(self) -> None:
         """The default settings.transaction_cost_bps must equal baselines COST_PER_TRADE."""
-        from mcp_quant_agent.backtest.baselines import COMMISSION_BPS, COST_PER_TRADE, SLIPPAGE_BPS
+        from mcp_quant_agent.backtest.baselines import (
+            COMMISSION_BPS,
+            COST_PER_TRADE,
+            SLIPPAGE_BPS,
+        )
         from mcp_quant_agent.config import settings
 
         assert settings.transaction_cost_bps == pytest.approx(
-            (COMMISSION_BPS + SLIPPAGE_BPS)
+            COMMISSION_BPS + SLIPPAGE_BPS
         ), (
             "settings.transaction_cost_bps must equal COMMISSION_BPS + SLIPPAGE_BPS "
             "for symmetric agent vs baseline comparison."
         )
-        assert COST_PER_TRADE == pytest.approx(settings.transaction_cost_bps / 10_000.0)
+        assert pytest.approx(settings.transaction_cost_bps / 10_000.0) == COST_PER_TRADE

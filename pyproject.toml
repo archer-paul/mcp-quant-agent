@@ -68,6 +68,19 @@ packages = ["src/mcp_quant_agent"]
 target-version = "py311"
 line-length = 88
 src = ["src", "tests"]
+extend-exclude = [
+    # One-off forensic scripts retained for audit history; production runners
+    # are linted explicitly and remain in the default check path.
+    "scripts/audit_non_trim_sells.py",
+    "scripts/diag_unknown_regime.py",
+    "scripts/eval_pm_stub.py",
+    "scripts/recompute_pm_faith_no_news.py",
+    "scripts/recount_faithfulness_post_news.py",
+    "scripts/run_medium_baselines.py",
+    "scripts/step0_policy_preregistration.py",
+    "scripts/step3_dual_faithfulness.py",
+    "scripts/step4_annotation_sample_v2.py",
+]
 
 [tool.ruff.lint]
 select = [

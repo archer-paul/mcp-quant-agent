@@ -138,14 +138,21 @@ trading decision.  Think through all of these before writing your output:
 6. PORTFOLIO SIZING (read carefully):
    - NAV and cash are in the portfolio state below.
    - Target 10-15% of NAV per position.  Hard cap: 20% of NAV per position.
+   - The 20% hard cap is binding on existing positions too:
+       if current_position_value > 0.20 * NAV because price drift pushed it
+       over the cap, SELL enough shares to bring the position back to <=20%
+       of NAV.  Do not ignore an over-cap position, even when signals are
+       bullish; trim only the minimum needed if the thesis remains positive.
    - BUY quantity formula:
        target_value    = 0.10 * NAV          (or up to 0.15 * NAV if high conviction)
        existing_value  = current_position_qty * last_close_price
        additional_value = min(target_value, 0.20 * NAV - existing_value)
        quantity        = floor(additional_value / last_close_price)
      Example: NAV=50000, price=185, held=0 → qty = floor(0.10*50000/185) = 27
-   - SELL quantity: use position size from the portfolio (sell entire position,
-     or a partial fraction). Never sell more shares than you currently hold.
+   - SELL quantity: if over the 20% cap, sell at least
+       ceil((current_position_value - 0.20 * NAV) / last_close_price)
+     shares. Otherwise use position size from the portfolio (sell entire
+     position, or a partial fraction). Never sell more shares than you hold.
    - If NAV < 500 (portfolio severely depleted): hold everything, do not trade.
    - quantity=0 is ONLY valid for action="hold".
 
@@ -157,6 +164,8 @@ Rules:
 - "hold" -> quantity MUST be 0.
 - "buy" / "sell" -> quantity MUST be > 0.
 - Single position MUST NOT exceed 20% of portfolio NAV.
+- If an existing position exceeds 20% of NAV, action MUST be "sell" with
+  enough quantity to restore the cap unless the computed trim rounds to 0.
 - Insufficient data (<20 bars) -> {"action": "hold", "quantity": 0, "rationale": "insufficient data"}.
 - IMPORTANT: Do NOT add a "chain_of_thought" key.  Write all reasoning inside "rationale".
 """
@@ -197,7 +206,7 @@ def _parse_decision(raw: str) -> dict[str, Any]:
             "quantity": quantity,
             "rationale": str(d.get("rationale", "")),
         }
-    except (json.JSONDecodeError, ValueError, TypeError) as json_exc:
+    except (json.JSONDecodeError, ValueError, TypeError):
         pass  # fall through to Stage 2
 
     # ── Stage 2: regex extraction from malformed / truncated JSON ────────────
@@ -214,10 +223,8 @@ def _parse_decision(raw: str) -> dict[str, Any]:
         quantity = int(qty_m.group(1)) if qty_m else 0
         rationale = rat_m.group(1) if rat_m else ""
         # Unescape JSON string escapes so the rationale reads naturally.
-        try:
+        with contextlib.suppress(Exception):
             rationale = json.loads(f'"{rationale}"')
-        except Exception:
-            pass  # keep raw form if re-escape fails
         if action == "hold":
             quantity = 0
         logger.warning(
@@ -231,7 +238,7 @@ def _parse_decision(raw: str) -> dict[str, Any]:
     logger.warning(
         "Failed to parse LLM decision (both JSON and regex): raw=%r", raw[:200]
     )
-    return {"action": "hold", "quantity": 0, "rationale": f"parse_error: malformed JSON"}
+    return {"action": "hold", "quantity": 0, "rationale": "parse_error: malformed JSON"}
 
 
 class StubBackbone:
@@ -301,7 +308,7 @@ async def _call_openai_async(
     model: str,
     prompt: str,
     max_retries: int = 6,
-) -> str:
+) -> tuple[str, dict[str, int]]:
     """Call the OpenAI chat API asynchronously with exponential back-off.
 
     Retries on HTTP 429 (rate-limit) and transient timeouts.  The back-off
@@ -349,7 +356,9 @@ async def _call_openai_async(
                 max_tokens=4096,
                 response_format={"type": "json_object"},
             )
-            return str(response.choices[0].message.content or "")
+            from mcp_quant_agent.llm_telemetry import usage_from_response
+
+            return str(response.choices[0].message.content or ""), usage_from_response(response)
         except _RETRIABLE as exc:
             last_exc = exc
             wait = min(2**attempt, 32)
@@ -378,9 +387,17 @@ class OpenAIBackbone:
         Set to False for final thesis runs to ensure fresh responses.
     """
 
-    def __init__(self, model: str, use_cache: bool = True) -> None:
+    def __init__(
+        self,
+        model: str,
+        use_cache: bool = True,
+        usage_log_path: Path | None = None,
+        run_id: str | None = None,
+    ) -> None:
         self.model = model
         self.use_cache = use_cache
+        self.usage_log_path = usage_log_path
+        self.run_id = run_id
 
     def decide(self, state: AgentState) -> dict[str, Any]:
         prompt = self._build_prompt(state)
@@ -390,6 +407,18 @@ class OpenAIBackbone:
             cached = _load_cache(key)
             if cached is not None:
                 logger.debug("LLM cache HIT for %s/%s", state["ticker"], state["t_now_str"])
+                from mcp_quant_agent.llm_telemetry import log_llm_event
+
+                log_llm_event(
+                    self.usage_log_path,
+                    run_id=self.run_id,
+                    model=self.model,
+                    label=f"single_agent:{state['ticker']}:{state['t_now_str'][:10]}",
+                    span_type="single_agent",
+                    cache_hit=True,
+                    prompt_hash=key,
+                    elapsed_ms=0.0,
+                )
                 return _parse_decision(cached)
 
         try:
@@ -397,6 +426,7 @@ class OpenAIBackbone:
         except ImportError:
             import openai
 
+        t_start = time.perf_counter()
         response = openai.chat.completions.create(
             model=self.model,
             messages=[
@@ -409,11 +439,26 @@ class OpenAIBackbone:
             # Requires the system prompt to mention "JSON" (it does).
             response_format={"type": "json_object"},
         )
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
         content = str(response.choices[0].message.content or "")
+        from mcp_quant_agent.llm_telemetry import log_llm_event, usage_from_response
+
+        usage = usage_from_response(response)
 
         if self.use_cache:
             _save_cache(key, content)
             logger.debug("LLM cache MISS — saved for %s/%s", state["ticker"], state["t_now_str"])
+        log_llm_event(
+            self.usage_log_path,
+            run_id=self.run_id,
+            model=self.model,
+            label=f"single_agent:{state['ticker']}:{state['t_now_str'][:10]}",
+            span_type="single_agent",
+            cache_hit=False,
+            prompt_hash=key,
+            elapsed_ms=elapsed_ms,
+            usage=usage,
+        )
 
         return _parse_decision(content)
 
@@ -441,10 +486,24 @@ class OpenAIBackbone:
                     "LLM cache HIT (async) for %s/%s",
                     state["ticker"], state["t_now_str"],
                 )
+                from mcp_quant_agent.llm_telemetry import log_llm_event
+
+                log_llm_event(
+                    self.usage_log_path,
+                    run_id=self.run_id,
+                    model=self.model,
+                    label=f"single_agent:{state['ticker']}:{state['t_now_str'][:10]}",
+                    span_type="single_agent",
+                    cache_hit=True,
+                    prompt_hash=key,
+                    elapsed_ms=0.0,
+                )
                 return _parse_decision(cached)
 
         async with semaphore:
-            content = await _call_openai_async(self.model, prompt)
+            t_start = time.perf_counter()
+            content, usage = await _call_openai_async(self.model, prompt)
+            elapsed_ms = (time.perf_counter() - t_start) * 1000.0
 
         if self.use_cache:
             _save_cache(key, content)
@@ -452,6 +511,19 @@ class OpenAIBackbone:
                 "LLM cache MISS (async) — saved for %s/%s",
                 state["ticker"], state["t_now_str"],
             )
+        from mcp_quant_agent.llm_telemetry import log_llm_event
+
+        log_llm_event(
+            self.usage_log_path,
+            run_id=self.run_id,
+            model=self.model,
+            label=f"single_agent:{state['ticker']}:{state['t_now_str'][:10]}",
+            span_type="single_agent",
+            cache_hit=False,
+            prompt_hash=key,
+            elapsed_ms=elapsed_ms,
+            usage=usage,
+        )
         return _parse_decision(content)
 
     @staticmethod
@@ -466,6 +538,16 @@ class OpenAIBackbone:
         indicators = state.get("indicators", {})
         portfolio = state.get("portfolio", {})
         regime = state.get("regime") or "unknown"
+        nav = float(portfolio.get("nav", 0.0)) or 1.0
+        portfolio_for_prompt = dict(portfolio)
+        portfolio_for_prompt["positions"] = [
+            {
+                **pos,
+                "pct_of_nav": round(float(pos.get("market_value", 0.0)) / nav, 4),
+            }
+            for pos in portfolio.get("positions", [])
+            if isinstance(pos, dict)
+        ]
 
         bar_rows = [
             f"  {b['date']} O={float(b['open']):.2f} H={float(b['high']):.2f} "
@@ -493,14 +575,45 @@ class OpenAIBackbone:
             f"Technical indicators (computed at T_NOW):\n"
             f"{json.dumps(ind_clean, indent=2)}\n\n"
             f"Recent news (up to T_NOW):\n{news_text}\n\n"
-            f"Portfolio state:\n{json.dumps(portfolio, indent=2)}\n\n"
-            f"Provide your chain-of-thought then output the JSON decision.\n"
+            f"Portfolio state:\n{json.dumps(portfolio_for_prompt, indent=2)}\n\n"
+            "Output only the JSON decision described in the system prompt.\n"
         )
 
 
 # ---------------------------------------------------------------------------
 # Standalone perceive helper (used by async engine)
 # ---------------------------------------------------------------------------
+
+
+def _get_single_agent_news(
+    ticker: str,
+    *,
+    end_str: str,
+    news_start: str,
+) -> list[dict[str, Any]]:
+    from mcp_quant_agent.config import settings
+
+    if settings.news_corpus_enabled:
+        from mcp_quant_agent.mcp_servers.data.news_corpus_cache import NewsCorpusCache
+
+        corpus_items = NewsCorpusCache().read_filtered(ticker, limit=100, strict=True)
+        rows = [
+            {
+                "datetime": str(item.get("published_at", "")),
+                "headline": str(item.get("title", "")),
+                "summary": str(item.get("body", ""))[:300],
+                "source": str(item.get("source", "")),
+                "url": str(item.get("url", "")),
+                "ticker": ticker.upper(),
+            }
+            for item in corpus_items
+            if news_start <= str(item.get("published_at", ""))[:10] <= end_str
+        ]
+        return rows[:10]
+
+    from mcp_quant_agent.mcp_servers.data.finnhub_source import get_news_items
+
+    return get_news_items(ticker, news_start, end_str)
 
 
 def perceive_ticker(
@@ -554,10 +667,8 @@ def perceive_ticker(
         logger.warning("perceive: bars fetch failed for %s: %s", ticker, exc)
 
     try:
-        from mcp_quant_agent.mcp_servers.data.finnhub_source import get_news_items
-
         news_start = (t_now_dt - dt.timedelta(days=30)).date().isoformat()
-        news = get_news_items(ticker, news_start, end_str)
+        news = _get_single_agent_news(ticker, end_str=end_str, news_start=news_start)
     except Exception as exc:
         errors.append(f"news: {exc}")
         logger.debug("perceive: news fetch skipped for %s: %s", ticker, exc)
@@ -703,10 +814,12 @@ def build_graph(
             logger.warning("perceive: bars fetch failed for %s: %s", ticker, exc)
 
         try:
-            from mcp_quant_agent.mcp_servers.data.finnhub_source import get_news_items
-
             news_start = (t_now_dt - dt.timedelta(days=30)).date().isoformat()
-            news = get_news_items(ticker, news_start, end_str)
+            news = _get_single_agent_news(
+                ticker,
+                end_str=end_str,
+                news_start=news_start,
+            )
         except Exception as exc:
             errors.append(f"news: {exc}")
             logger.debug("perceive: news fetch skipped for %s: %s", ticker, exc)

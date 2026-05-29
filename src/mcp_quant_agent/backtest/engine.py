@@ -90,6 +90,7 @@ class BacktestEngine:
         use_llm_cache: bool = True,
         run_id: str | None = None,
         concurrency: int = 15,
+        price_offline: bool = False,
         transaction_cost_bps: float | None = None,
     ) -> None:
         self.tickers = tickers
@@ -100,6 +101,7 @@ class BacktestEngine:
         self.use_stub = use_stub
         self.use_llm_cache = use_llm_cache
         self.concurrency = concurrency
+        self.price_offline = price_offline
         # Default to settings value so all runs share the same cost assumption.
         # Pass 0.0 explicitly only in legacy tests that pre-date cost tracking.
         if transaction_cost_bps is None:
@@ -201,29 +203,63 @@ class BacktestEngine:
             self.start_date,
             self.end_date,
         )
+        from mcp_quant_agent.mcp_servers.data.bar_validation import validate_bar
         from mcp_quant_agent.mcp_servers.data.yfinance_source import (
+            _check_price_continuity,
             _fetch_raw_bars,
             _get_cache,
             _yfinance_end_exclusive,
         )
         price_data: dict[str, list[dict[str, Any]]] = {}
+        cache = _get_cache()
         for ticker in self.tickers:
             try:
-                # Fetch warm-up + full backtest range
-                all_bars = _fetch_raw_bars(
-                    ticker,
-                    warmup_start,
-                    _yfinance_end_exclusive(self.end_date, "1d"),
-                    "1d",
-                )
-                if all_bars:
+                if self.price_offline:
+                    all_bars = [
+                        dict(row)
+                        for row in cache.read_all(ticker, "1d")
+                        if warmup_start <= str(row.get("date", "")) <= self.end_date
+                    ]
+                    dates = sorted(str(row.get("date", "")) for row in all_bars)
+                    has_backtest = any(
+                        self.start_date <= date <= self.end_date for date in dates
+                    )
+                    has_warmup = (
+                        bool(dates)
+                        and dates[0] <= self.start_date
+                        and len(dates) >= 26
+                    )
+                    reaches_end = bool(dates) and dates[-1] >= self.end_date
+                    if not (has_backtest and has_warmup and reaches_end):
+                        observed = (
+                            f"{dates[0]}->{dates[-1]} ({len(dates)} rows)"
+                            if dates
+                            else "empty cache"
+                        )
+                        raise RuntimeError(
+                            "Price cache miss/incomplete for "
+                            f"{ticker} {warmup_start}->{self.end_date}: {observed}. "
+                            "price_offline=True forbids API fetch."
+                        )
+                else:
+                    # Fetch warm-up + full backtest range
+                    all_bars = _fetch_raw_bars(
+                        ticker,
+                        warmup_start,
+                        _yfinance_end_exclusive(self.end_date, "1d"),
+                        "1d",
+                    )
+                if all_bars and not self.price_offline:
                     # Overwrite the parquet cache so perceive_ticker finds warm-up data.
                     # IMPORTANT: use cache.write() (overwrite), NOT merge_and_write().
                     # merge_and_write() keeps old bars for dates not covered by the
                     # new fetch, which can preserve stale / split-contaminated data
                     # from a previous run.  The warm-up always fetches the FULL range
                     # (warmup_start → end_date), so overwriting is always safe.
-                    _get_cache().write(ticker, "1d", all_bars)
+                    cache.write(ticker, "1d", all_bars)
+                for bar in all_bars:
+                    validate_bar(bar, ticker)
+                _check_price_continuity(all_bars, ticker)
                 # Trading loop only needs bars within the backtest window
                 price_data[ticker] = [b for b in all_bars if b["date"] >= self.start_date]
                 logger.info(
@@ -231,6 +267,8 @@ class BacktestEngine:
                     ticker, len(all_bars), len(price_data[ticker]),
                 )
             except Exception as exc:
+                if self.price_offline:
+                    raise
                 logger.error("  Failed to fetch %s: %s", ticker, exc)
                 price_data[ticker] = []
 
@@ -250,7 +288,12 @@ class BacktestEngine:
             if not os.environ.get("OPENAI_API_KEY") and _settings.openai_api_key:
                 os.environ["OPENAI_API_KEY"] = _settings.openai_api_key
             _is_langfuse_configured()
-            backbone = OpenAIBackbone(model=self.model, use_cache=self.use_llm_cache)
+            backbone = OpenAIBackbone(
+                model=self.model,
+                use_cache=self.use_llm_cache,
+                usage_log_path=Path("runs") / self.run_id / "llm_usage.jsonl",
+                run_id=self.run_id,
+            )
 
         semaphore = asyncio.Semaphore(self.concurrency)
 

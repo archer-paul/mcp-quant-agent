@@ -127,3 +127,37 @@ def test_sentiment_evidence_uses_only_filtered_articles(tmp_path) -> None:
     assert "AAPL beats expectations" in evidence_text
     assert "future-source" not in evidence_text
     assert "future lawsuit" not in evidence_text
+
+
+def test_single_agent_perceive_uses_enabled_news_corpus(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from mcp_quant_agent.agents import orchestrator
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        raise AssertionError("Finnhub should not be called")
+
+    set_clock(SimulationClock("2023-01-05T12:00:00"))
+    cache = NewsCorpusCache(tmp_path, max_items=10)
+    cache.write_corpus(
+        "AAPL",
+        [
+            _article("2023-01-04T09:00:00", "causal corpus item"),
+            _article("2023-01-06T09:00:00", "future corpus item"),
+        ],
+    )
+    monkeypatch.setattr(settings, "news_corpus_enabled", True)
+    monkeypatch.setattr(settings, "news_corpus_dir", tmp_path)
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.finnhub_source.get_news_items",
+        fail_if_called,
+    )
+    monkeypatch.setattr(orchestrator, "NewsCorpusCache", NewsCorpusCache, raising=False)
+
+    news = orchestrator._get_single_agent_news(
+        "AAPL",
+        end_str="2023-01-05",
+        news_start="2023-01-01",
+    )
+
+    headlines = [item["headline"] for item in news]
+    assert "causal corpus item" in headlines
+    assert "future corpus item" not in headlines

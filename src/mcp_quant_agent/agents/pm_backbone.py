@@ -18,6 +18,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from mcp_quant_agent.agents.orchestrator import _cache_key, _load_cache, _save_cache
@@ -545,6 +546,8 @@ class _OpenAIChatMixin:
     last_cache_hit: bool
     last_prompt_hash: str
     cache_events: list[dict[str, Any]]
+    usage_log_path: Path | None
+    run_id: str | None
 
     def _call_json_chat(
         self,
@@ -559,6 +562,12 @@ class _OpenAIChatMixin:
         key = _cache_key(self.model, cache_prompt)
         self.last_prompt_hash = key
         self.last_cache_hit = False
+        label_head = label.split(":", maxsplit=1)[0]
+        span_type = (
+            label_head
+            .replace("investment_debate", "debate")
+            .replace("risk_debate", "debate")
+        )
 
         if self.use_cache:
             cached = _load_cache(key)
@@ -567,18 +576,47 @@ class _OpenAIChatMixin:
                 self.cache_events.append(
                     {"label": label, "cache_hit": True, "prompt_hash": key}
                 )
+                from mcp_quant_agent.llm_telemetry import log_llm_event
+
+                log_llm_event(
+                    self.usage_log_path,
+                    run_id=self.run_id,
+                    model=self.model,
+                    label=label,
+                    span_type=span_type,
+                    cache_hit=True,
+                    prompt_hash=key,
+                    elapsed_ms=0.0,
+                )
                 return cached
 
-        content = self._call_openai_raw(
+        import time
+
+        t_start = time.perf_counter()
+        content, usage = self._call_openai_raw(
             system=system,
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
         if self.use_cache:
             _save_cache(key, content)
         self.cache_events.append(
             {"label": label, "cache_hit": False, "prompt_hash": key}
+        )
+        from mcp_quant_agent.llm_telemetry import log_llm_event
+
+        log_llm_event(
+            self.usage_log_path,
+            run_id=self.run_id,
+            model=self.model,
+            label=label,
+            span_type=span_type,
+            cache_hit=False,
+            prompt_hash=key,
+            elapsed_ms=elapsed_ms,
+            usage=usage,
         )
         return content
 
@@ -589,7 +627,7 @@ class _OpenAIChatMixin:
         prompt: str,
         max_tokens: int,
         temperature: float,
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         from mcp_quant_agent.config import settings
         from mcp_quant_agent.observability.langfuse_setup import _is_langfuse_configured
 
@@ -614,18 +652,29 @@ class _OpenAIChatMixin:
             max_tokens=max_tokens,
             response_format={"type": "json_object"},
         )
-        return str(response.choices[0].message.content or "")
+        from mcp_quant_agent.llm_telemetry import usage_from_response
+
+        content = str(response.choices[0].message.content or "")
+        return content, usage_from_response(response)
 
 
 class OpenAIDiscussionBackbone(_OpenAIChatMixin):
     """TradingAgents-style LLM communication chain followed by PM allocation."""
 
-    def __init__(self, model: str, use_cache: bool = True) -> None:
+    def __init__(
+        self,
+        model: str,
+        use_cache: bool = True,
+        usage_log_path: Path | None = None,
+        run_id: str | None = None,
+    ) -> None:
         self.model = model
         self.use_cache = use_cache
         self.last_cache_hit = False
         self.last_prompt_hash = ""
         self.cache_events: list[dict[str, Any]] = []
+        self.usage_log_path = usage_log_path
+        self.run_id = run_id
 
     def decide(
         self,
@@ -1182,12 +1231,20 @@ class OpenAIDiscussionBackbone(_OpenAIChatMixin):
 class OpenAIPMBackbone(_OpenAIChatMixin):
     """Single-call OpenAI backbone for the global Portfolio Manager."""
 
-    def __init__(self, model: str, use_cache: bool = True) -> None:
+    def __init__(
+        self,
+        model: str,
+        use_cache: bool = True,
+        usage_log_path: Path | None = None,
+        run_id: str | None = None,
+    ) -> None:
         self.model = model
         self.use_cache = use_cache
         self.last_cache_hit = False
         self.last_prompt_hash = ""
         self.cache_events: list[dict[str, Any]] = []
+        self.usage_log_path = usage_log_path
+        self.run_id = run_id
 
     def decide(
         self,

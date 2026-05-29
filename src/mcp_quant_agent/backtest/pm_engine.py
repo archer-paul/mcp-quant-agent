@@ -115,6 +115,8 @@ class PMBacktestEngine:
             pm_backbone = self.pm_backbone or OpenAIDiscussionBackbone(
                 model=model,
                 use_cache=self.use_llm_cache,
+                usage_log_path=self.output_root / "runs" / self.run_id / "llm_usage.jsonl",
+                run_id=self.run_id,
             )
 
         # Decision memory log — causal cross-date context injection.

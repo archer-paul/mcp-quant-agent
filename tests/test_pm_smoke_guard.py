@@ -5,7 +5,10 @@ from __future__ import annotations
 import pytest
 
 from mcp_quant_agent.backtest.pm_engine import PMBacktestEngine
-from mcp_quant_agent.backtest.pm_smoke_guard import validate_pm_api_smoke_request
+from mcp_quant_agent.backtest.pm_smoke_guard import (
+    validate_pm_api_smoke_request,
+    validate_pm_multiday_request,
+)
 
 
 def _validate(**overrides: object) -> object:
@@ -68,3 +71,32 @@ def test_pm_api_engine_requires_validated_smoke_guard() -> None:
 
     with pytest.raises(RuntimeError, match="validated PMSmokeGuardResult"):
         engine.run()
+
+
+def test_reference_run_allows_one_year_three_tickers() -> None:
+    result = validate_pm_multiday_request(
+        tickers=["AAPL", "MSFT", "NVDA"],
+        start_date="2023-01-03",
+        end_date="2023-12-29",
+        model="gpt-4.1-mini",
+        dev_model="gpt-4.1-mini",
+        use_llm_cache=True,
+        acknowledge_cost=True,
+        reference_run=True,
+    )
+
+    assert result.tickers == ["AAPL", "MSFT", "NVDA"]
+    assert result.n_trading_dates > 200
+
+
+def test_non_reference_multiday_still_rejects_one_year() -> None:
+    with pytest.raises(RuntimeError, match="at most 22 trading dates"):
+        validate_pm_multiday_request(
+            tickers=["AAPL", "MSFT", "NVDA"],
+            start_date="2023-01-03",
+            end_date="2023-12-29",
+            model="gpt-4.1-mini",
+            dev_model="gpt-4.1-mini",
+            use_llm_cache=True,
+            acknowledge_cost=True,
+        )

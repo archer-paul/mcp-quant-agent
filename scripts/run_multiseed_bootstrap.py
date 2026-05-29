@@ -41,7 +41,7 @@ def main(
     output_root: Path = typer.Option(Path(".")),
 ) -> None:
     """Multi-seed single-agent run + bootstrap CI."""
-    from mcp_quant_agent.eval.financial import bootstrap_sharpe_ci, compute_all_metrics
+    from mcp_quant_agent.eval.financial import bootstrap_sharpe_ci
 
     tickers = [t.strip().upper() for t in tickers if t.strip()]
     if len(tickers) > 3:
@@ -70,6 +70,7 @@ def main(
     for seed in range(n_seeds):
         typer.echo(f"\n[Seed {seed}/{n_seeds-1}] Running ...")
         import datetime as dt
+
         ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"multiseed_s{seed}_{ts}"
 
@@ -86,17 +87,19 @@ def main(
         nav = results.get("nav_series", [])
         metrics = results.get("metrics", {})
         ci = bootstrap_sharpe_ci(nav, n_bootstrap=1000, seed=seed) if len(nav) > 5 else {}
-        seed_results.append({
-            "seed": seed,
-            "run_id": run_id,
-            "n_decisions": results.get("n_decisions", 0),
-            "nav_series": nav,
-            "sharpe": metrics.get("sharpe", 0),
-            "annualised_return": metrics.get("annualised_return", 0),
-            "max_drawdown": metrics.get("max_drawdown", 0),
-            "ci_lower": ci.get("ci_lower", 0),
-            "ci_upper": ci.get("ci_upper", 0),
-        })
+        seed_results.append(
+            {
+                "seed": seed,
+                "run_id": run_id,
+                "n_decisions": results.get("n_decisions", 0),
+                "nav_series": nav,
+                "sharpe": metrics.get("sharpe", 0),
+                "annualised_return": metrics.get("annualised_return", 0),
+                "max_drawdown": metrics.get("max_drawdown", 0),
+                "ci_lower": ci.get("ci_lower", 0),
+                "ci_upper": ci.get("ci_upper", 0),
+            }
+        )
         typer.echo(
             f"  seed={seed}: sharpe={metrics.get('sharpe', 0):.3f}  "
             f"CI=[{ci.get('ci_lower', 0):.3f}, {ci.get('ci_upper', 0):.3f}]  "
@@ -105,7 +108,7 @@ def main(
 
     # Across-seed distribution
     sharpes = [r["sharpe"] for r in seed_results]
-    typer.echo(f"\n=== MULTI-SEED SUMMARY ===")
+    typer.echo("\n=== MULTI-SEED SUMMARY ===")
     typer.echo(f"  n_seeds     = {n_seeds}")
     typer.echo(f"  Sharpe mean = {sum(sharpes)/len(sharpes):.3f}")
     typer.echo(f"  Sharpe min  = {min(sharpes):.3f}")
@@ -122,7 +125,7 @@ def main(
         )
 
     # Note on same-cache behavior
-    n_unique_sharpes = len(set(round(s, 6) for s in sharpes))
+    n_unique_sharpes = len({round(s, 6) for s in sharpes})
     if n_unique_sharpes == 1:
         typer.echo(
             "\n  NOTE: All seeds produced identical Sharpe (expected with cache ON + "

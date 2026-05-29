@@ -508,7 +508,7 @@ class TestTimezoneHandling:
 
     def test_aware_utc_exact_boundary_is_not_future(self) -> None:
         """An aware datetime at exactly t_now (UTC midnight) is not future."""
-        ts = dt.datetime(2022, 6, 15, 0, 0, tzinfo=dt.timezone.utc)
+        ts = dt.datetime(2022, 6, 15, 0, 0, tzinfo=dt.UTC)
         assert self.clock.is_future(ts) is False
 
     def test_aware_to_datetime_strips_tz_after_conversion(self) -> None:

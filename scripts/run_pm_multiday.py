@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -50,6 +51,11 @@ def main(
         "--price-offline",
         help="Forbid price API fetches; fail if the local price cache is incomplete.",
     ),
+    reference_run: bool = typer.Option(
+        False,
+        "--reference-run",
+        help="Allow the explicit 1-year common-reference PM envelope (max 260 weekdays).",
+    ),
     label: str = typer.Option("", help="Optional label for this run."),
     output_root: Path = typer.Option(Path("."), help="Root for runs/ and results/."),
 ) -> None:
@@ -69,6 +75,7 @@ def main(
             dev_model=settings.agent_model_dev,
             use_llm_cache=True,
             acknowledge_cost=acknowledge_cost or dry_run,
+            reference_run=reference_run,
         )
     except RuntimeError as exc:
         typer.echo(f"FATAL guardrail: {exc}", err=True)
@@ -86,6 +93,8 @@ def main(
         typer.echo(f"  label     : {label}")
     if price_offline:
         typer.echo("  prices    : cache-only (--price-offline)")
+    if reference_run:
+        typer.echo("  scope     : 1-year common-reference PM run")
 
     if dry_run:
         typer.echo("\n[DRY RUN] Guardrail check passed. No API calls made.")
@@ -168,8 +177,14 @@ def main(
     )
     for regime_key, rdecs in sorted(segs.items()):
         g_r = compute_grounding(rdecs)
+        pm_g_r = compute_pm_evidence_grounding(rdecs)
+        # PM faithfulness is deterministic and uses the segment's own first
+        # portfolio state as its baseline, so regime rows remain comparable.
+        pm_f_r = compute_pm_faithfulness(rdecs)
         typer.echo(
-            f"    {regime_key}: n={len(rdecs)} ground={g_r['grounding']:.4f}"
+            f"    {regime_key}: n={len(rdecs)} ground={g_r['grounding']:.4f} "
+            f"pm_evidence_ground={pm_g_r['pm_evidence_grounding']:.4f} "
+            f"pm_faith={pm_f_r['pm_faithfulness']:.4f}"
         )
 
     # MCP time-machine audit
@@ -231,12 +246,43 @@ def main(
 
     # ── Cost summary ─────────────────────────────────────────────────────────
     typer.echo("\n=== COST SUMMARY ===")
+    from mcp_quant_agent.llm_telemetry import summarize_usage
+
+    usage_log_path = Path(output_root) / "runs" / run_id / "llm_usage.jsonl"
+    usage = summarize_usage(usage_log_path)
+    typer.echo(
+        f"  Actual telemetry: api_calls={usage['n_api_calls']} "
+        f"cache_hits={usage['n_cache_hits']} tokens={usage['total_tokens']} "
+        f"cost=${usage['incremental_cost_usd']:.6f}"
+    )
     typer.echo(f"  PM decisions  : {n_decisions}")
     typer.echo(f"  Est. LLM calls: {n_decisions} PM dates x 11 calls")
     typer.echo(f"  Est. cost     : ${n_decisions * _APPROX_COST_PER_PM_DATE_USD:.4f} (0 if cache hit)")
     typer.echo(f"  decisions.jsonl: runs/{run_id}/decisions.jsonl")
 
     # Manifest
+    reasoning_by_regime: dict[str, dict[str, Any]] = {}
+    for regime_key, rdecs in sorted(segs.items()):
+        if not rdecs:
+            continue
+        g_r = compute_grounding(rdecs)
+        pm_g_r = compute_pm_evidence_grounding(rdecs)
+        pm_f_r = compute_pm_faithfulness(rdecs)
+        reasoning_by_regime[regime_key] = {
+            "n_decisions": len(rdecs),
+            "grounding": g_r.get("grounding", 0),
+            "pm_evidence_grounding": pm_g_r.get("pm_evidence_grounding", 0),
+            "pm_evidence_coverage": pm_g_r.get("pm_evidence_coverage", 0),
+            "n_grounded": g_r.get("n_grounded", 0),
+            "n_claims_total": g_r.get("n_claims_total", 0),
+            "pm_faithfulness": pm_f_r.get("pm_faithfulness", 0),
+            "pm_faithfulness_strict": pm_f_r.get("pm_faithfulness_strict", 0),
+            "n_scoreable": pm_f_r.get("n_scoreable", 0),
+            "n_faithful": pm_f_r.get("n_faithful", 0),
+            "n_unfaithful": pm_f_r.get("n_unfaithful", 0),
+            "n_constrained": pm_f_r.get("n_constrained", 0),
+        }
+
     manifest = {
         "run_id": run_id,
         "label": label or f"pm-multiday-{start}-{end}",
@@ -247,16 +293,20 @@ def main(
         "model": chosen_model,
         "use_llm_cache": True,
         "price_offline": price_offline,
+        "reference_run": reference_run,
         "news_corpus_enabled": settings.news_corpus_enabled,
         "news_corpus_dir": str(settings.news_corpus_dir),
         "transaction_cost_bps": settings.transaction_cost_bps,
         "n_decisions": n_decisions,
         "metrics": {k: float(v) for k, v in metrics.items()},
         "grounding_overall": grounding.get("grounding", 0),
+        "reasoning_by_regime": reasoning_by_regime,
         "mcp_time_machine_audit": time_audit,
         "pm_evidence_grounding": pm_grounding,
         "pm_faithfulness": pm_faith.get("pm_faithfulness", 0),
         "pm_faithfulness_strict": pm_faith.get("pm_faithfulness_strict", 0),
+        "pm_faithfulness_details": pm_faith,
+        "llm_usage": usage,
     }
     manifest_path = Path(output_root) / "results" / run_id / "pm_multiday_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)

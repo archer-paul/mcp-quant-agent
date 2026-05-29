@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
+import os
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -91,6 +91,11 @@ def main(
         False,
         help="Disable LLM cache. Use only for final thesis runs.",
     ),
+    price_offline: bool = typer.Option(
+        False,
+        "--price-offline",
+        help="Forbid price API fetches; fail if the local price cache is incomplete.",
+    ),
     skip_faithfulness: bool = typer.Option(
         False,
         help="Skip faithfulness judge (saves cost if already computed).",
@@ -135,6 +140,8 @@ def main(
     typer.echo(f"  tier     : {tier}")
     typer.echo(f"  model    : {model}")
     typer.echo(f"  cache    : {'ON (repeat runs free)' if not no_cache else 'OFF'}")
+    if price_offline:
+        typer.echo("  prices   : cache-only (--price-offline)")
     typer.echo(f"  max_decisions (guard): {max_decisions}")
     typer.echo(f"  est. cost (uncached) : ${est_cost:.4f}")
     if label:
@@ -149,7 +156,7 @@ def main(
     # ── Run the backtest ──────────────────────────────────────────────────────
     from mcp_quant_agent.backtest.engine import BacktestEngine
 
-    typer.echo(f"\n[1/3] Running single-agent backtest ...")
+    typer.echo("\n[1/3] Running single-agent backtest ...")
     try:
         engine = BacktestEngine(
             tickers=tickers,
@@ -159,6 +166,7 @@ def main(
             model=model,
             use_stub=False,
             use_llm_cache=not no_cache,
+            price_offline=price_offline,
         )
         results = engine.run()
     except Exception as exc:
@@ -174,6 +182,9 @@ def main(
     # Load decisions.jsonl
     run_id = engine.run_id
     jsonl_path = Path(output_root) / "runs" / run_id / "decisions.jsonl"
+    usage_log_path = Path(output_root) / "runs" / run_id / "llm_usage.jsonl"
+    os.environ["MCP_QUANT_LLM_USAGE_LOG"] = str(usage_log_path)
+    os.environ["MCP_QUANT_RUN_ID"] = run_id
     if not jsonl_path.exists():
         typer.echo(f"FATAL: decisions.jsonl not found at {jsonl_path}", err=True)
         raise typer.Exit(1)
@@ -209,10 +220,10 @@ def main(
 
     # Regime breakdown
     from mcp_quant_agent.eval.reasoning import (
-        _extract_decision_regime,
         _segment_by_regime,
         compute_faithfulness_llm,
         compute_grounding,
+        compute_mcp_time_machine_audit,
     )
 
     segs = _segment_by_regime(decisions)
@@ -229,8 +240,14 @@ def main(
         f"\n  GROUNDING (overall): {grounding_overall['grounding']:.4f}  "
         f"({grounding_overall['n_grounded']}/{grounding_overall['n_claims_total']} claims)"
     )
+    time_audit = compute_mcp_time_machine_audit(decisions)
+    typer.echo(
+        f"  MCP audit       : pass={time_audit['pass']} "
+        f"({time_audit['n_violations']}/{time_audit['n_timestamp_checks']} violations/checks)"
+    )
 
     # ── Eval: faithfulness (v2 policy-aware, cached) ─────────────────────────
+    reasoning_by_regime: dict[str, dict[str, Any]] = {}
     if not skip_faithfulness:
         faith_v2 = compute_faithfulness_llm(
             decisions,
@@ -253,6 +270,18 @@ def main(
                 continue
             f_r = compute_faithfulness_llm(rdecs, judge_model=model, policy_aware=True)
             g_r = compute_grounding(rdecs)
+            reasoning_by_regime[regime_key] = {
+                "n_decisions": len(rdecs),
+                "faithfulness": f_r.get("faithfulness", 0),
+                "faithfulness_strict": f_r.get("faithfulness_strict", 0),
+                "n_scoreable": f_r.get("n_scoreable", 0),
+                "n_faithful": f_r.get("n_faithful", 0),
+                "n_unfaithful": f_r.get("n_unfaithful", 0),
+                "n_constrained": f_r.get("n_constrained", 0),
+                "grounding": g_r.get("grounding", 0),
+                "n_grounded": g_r.get("n_grounded", 0),
+                "n_claims_total": g_r.get("n_claims_total", 0),
+            }
             typer.echo(
                 f"    {regime_key:10s}: n={len(rdecs):3d}  "
                 f"faith={f_r['faithfulness']:.3f}  "
@@ -272,17 +301,27 @@ def main(
         typer.echo("  [faithfulness skipped]")
 
     # ── Cost estimate ─────────────────────────────────────────────────────────
-    typer.echo(f"\n=== COST SUMMARY ===")
+    typer.echo("\n=== COST SUMMARY ===")
+    from mcp_quant_agent.llm_telemetry import summarize_usage
+
+    usage = summarize_usage(usage_log_path)
+    typer.echo(
+        f"  Actual telemetry: api_calls={usage['n_api_calls']} "
+        f"cache_hits={usage['n_cache_hits']} tokens={usage['total_tokens']} "
+        f"cost=${usage['incremental_cost_usd']:.6f}"
+    )
     typer.echo(f"  Backtest decisions : {n_decisions}")
     typer.echo(f"  Est. backtest cost : ${n_decisions * _APPROX_COST_PER_DECISION_USD:.4f} (0 if cache hit)")
     if not skip_faithfulness:
         faith_calls = n_decisions
         typer.echo(f"  Faithfulness judge : {faith_calls} calls × ${_APPROX_COST_PER_DECISION_USD:.5f}")
         typer.echo(f"  Est. judge cost    : ${faith_calls * _APPROX_COST_PER_DECISION_USD:.4f} (0 if cache hit)")
-    typer.echo(f"  NOTE: All results labelled 'smoke-scale'. Cache makes reruns free.")
+    typer.echo("  NOTE: Cache makes reruns free when prompts are unchanged.")
     typer.echo(f"  decisions.jsonl: runs/{run_id}/decisions.jsonl")
 
     # ── Write run manifest ────────────────────────────────────────────────────
+    from mcp_quant_agent.config import settings as _settings
+
     manifest = {
         "run_id": run_id,
         "label": label or f"bounded-{start}-{end}",
@@ -290,14 +329,21 @@ def main(
         "start": start,
         "end": end,
         "model": model,
+        "use_llm_cache": not no_cache,
+        "price_offline": price_offline,
+        "transaction_cost_bps": _settings.transaction_cost_bps,
         "n_decisions": n_decisions,
         "metrics": {k: float(v) for k, v in metrics.items()},
         "sharpe_ci": sharpe_ci,
         "grounding_overall": grounding_overall.get("grounding", 0),
+        "reasoning_by_regime": reasoning_by_regime,
+        "mcp_time_machine_audit": time_audit,
+        "llm_usage": usage,
     }
     if not skip_faithfulness:
         manifest["faithfulness_v2"] = faith_v2.get("faithfulness", 0)
         manifest["faithfulness_v2_strict"] = faith_v2.get("faithfulness_strict", 0)
+        manifest["faithfulness_v2_details"] = faith_v2
 
     manifest_path = Path(output_root) / "results" / run_id / "bounded_eval_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)

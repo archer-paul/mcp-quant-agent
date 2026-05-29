@@ -17,6 +17,7 @@ from mcp_quant_agent.agents.pm_backbone import TRADINGAGENTS_STYLE_LLM_CALLS
 
 _MAX_MULTIDAY_DATES = 22  # aligned with TIER_LIMITS["medium"].max_trading_dates
 _MAX_MULTIDAY_TICKERS = 3
+_MAX_REFERENCE_DATES = 260
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,7 @@ def validate_pm_multiday_request(
     dev_model: str,
     use_llm_cache: bool,
     acknowledge_cost: bool,
+    reference_run: bool = False,
 ) -> PMMultiDayGuardResult:
     """Validate a bounded multi-day PM API run (max 22 dates, max 3 tickers).
 
@@ -155,9 +157,10 @@ def validate_pm_multiday_request(
         raise RuntimeError(f"start_date must be <= end_date (got {start} > {end}).")
 
     n_dates = _count_weekdays(start, end)
-    if n_dates > _MAX_MULTIDAY_DATES:
+    max_dates = _MAX_REFERENCE_DATES if reference_run else _MAX_MULTIDAY_DATES
+    if n_dates > max_dates:
         raise RuntimeError(
-            f"PM multi-day run must span at most {_MAX_MULTIDAY_DATES} trading dates "
+            f"PM multi-day run must span at most {max_dates} trading dates "
             f"(got ~{n_dates} between {start} and {end}). "
             "Do not bypass this guard for PM API runs; use the single-agent "
             "thesis backtest for the full two-year production result."
