@@ -13,6 +13,8 @@ from mcp_quant_agent.eval.reasoning import (
     _is_constrained_hold,
     compute_faithfulness_llm,
     compute_grounding,
+    compute_mcp_time_machine_audit,
+    compute_pm_evidence_grounding,
 )
 
 # ---------------------------------------------------------------------------
@@ -408,3 +410,152 @@ class TestComputeGrounding:
         )
         result = compute_grounding([d])
         assert result["n_grounded"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# 6b. PM time-machine audit + evidence grounding
+# ---------------------------------------------------------------------------
+
+
+def _pm_decision_for_audit() -> dict[str, object]:
+    return {
+        "date": "2023-01-04",
+        "mode": "multi_agent_pm",
+        "regimes": {"AAPL": "bear"},
+        "mcp_calls": [
+            {
+                "ticker": "AAPL",
+                "tool": "get_price_history",
+                "source": "cache",
+                "max_timestamp": "2023-01-04",
+            },
+            {
+                "ticker": "AAPL",
+                "tool": "get_news_corpus",
+                "source": "news_corpus",
+                "max_timestamp": "2023-01-03T12:00:00",
+            },
+        ],
+        "tool_outputs": [
+            {
+                "ticker": "AAPL",
+                "tool": "get_price_history",
+                "max_timestamp": "2023-01-04",
+                "bars_recent": [
+                    {
+                        "date": "2023-01-04",
+                        "open": 125.0,
+                        "high": 127.0,
+                        "low": 124.0,
+                        "close": 126.36,
+                    }
+                ],
+            },
+            {
+                "ticker": "AAPL",
+                "tool": "compute_indicators",
+                "values": {
+                    "date": "2023-01-04",
+                    "close": 126.36,
+                    "rsi_14": 34.88,
+                    "sma_20": 135.2,
+                    "macd_histogram": -0.77,
+                },
+            },
+            {
+                "ticker": "AAPL",
+                "tool": "get_current_regime",
+                "regime": "bear",
+            },
+            {
+                "ticker": "AAPL",
+                "tool": "get_news_corpus",
+                "max_timestamp": "2023-01-03T12:00:00",
+                "items_recent": [
+                    {
+                        "datetime": "2023-01-03T12:00:00",
+                        "headline": "Apple supplier demand weakens",
+                        "source": "Reuters",
+                    }
+                ],
+            },
+        ],
+        "portfolio_before": {
+            "cash": 50_000.0,
+            "nav": 100_000.0,
+            "positions": [
+                {
+                    "ticker": "AAPL",
+                    "quantity": 100.0,
+                    "market_value": 12_636.0,
+                    "current_price": 126.36,
+                    "pct_of_nav": 0.12636,
+                }
+            ],
+        },
+        "orders": [{"date": "2023-01-04", "ticker": "AAPL"}],
+        "fills": [{"timestamp": "2023-01-04", "ticker": "AAPL"}],
+        "reports": [
+            {
+                "ticker": "AAPL",
+                "analyst": "technical",
+                "evidence": [
+                    "AAPL regime is bear",
+                    "Close 126.36 is below SMA 20 at 135.20",
+                    "RSI is low at 34.88",
+                ],
+            },
+            {
+                "ticker": "AAPL",
+                "analyst": "news",
+                "evidence": [
+                    "Reuters 2023-01-03T12:00:00: Apple supplier demand weakens"
+                ],
+            },
+            {
+                "ticker": "AAPL",
+                "analyst": "risk",
+                "evidence": ["cash at 50000.00", "position value 12636.00"],
+            },
+        ],
+        "rationale": "No numeric claims here.",
+    }
+
+
+def test_mcp_time_machine_audit_passes_for_causal_pm_decision() -> None:
+    audit = compute_mcp_time_machine_audit([_pm_decision_for_audit()])
+
+    assert audit["pass"] is True
+    assert audit["n_violations"] == 0
+    assert audit["n_timestamp_checks"] >= 6
+
+
+def test_mcp_time_machine_audit_flags_future_tool_output() -> None:
+    decision = _pm_decision_for_audit()
+    decision["tool_outputs"][0]["bars_recent"][0]["date"] = "2023-01-05"  # type: ignore[index]
+
+    audit = compute_mcp_time_machine_audit([decision])
+
+    assert audit["pass"] is False
+    assert audit["n_violations"] == 1
+    assert audit["violations"][0]["reason"] == "timestamp after t_now"
+
+
+def test_pm_evidence_grounding_matches_news_technical_and_risk_sources() -> None:
+    result = compute_pm_evidence_grounding([_pm_decision_for_audit()])
+
+    assert result["pm_evidence_grounding"] == 1.0
+    assert result["n_ungrounded"] == 0
+    assert result["by_analyst"]["news"]["grounded"] == 1
+    assert result["by_analyst"]["technical"]["grounded"] == 3
+    assert result["by_analyst"]["risk"]["grounded"] == 2
+
+
+def test_pm_evidence_grounding_flags_uncited_news() -> None:
+    decision = _pm_decision_for_audit()
+    decision["reports"][1]["evidence"] = ["A news article said demand weakened"]  # type: ignore[index]
+
+    result = compute_pm_evidence_grounding([decision])
+
+    assert result["n_ungrounded"] == 1
+    assert result["examples"][0]["analyst"] == "news"

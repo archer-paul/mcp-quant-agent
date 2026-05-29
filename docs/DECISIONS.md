@@ -2,6 +2,38 @@
 
 ---
 
+### 2026-05-29 - PM evidence grounding and MCP time-machine audit
+
+**Context:** The PM path uses multiple agents and concise final rationales. Numeric
+`compute_grounding` can correctly return 0 claims for the final PM rationale, but that does
+not audit whether analyst evidence was grounded in MCP tool outputs.
+
+**Decision:**
+- Keep `compute_grounding` as the numeric-claim metric for single-agent and final rationale
+  prose.
+- Add `compute_pm_evidence_grounding` for PM analyst reports. It checks technical/risk
+  evidence against indicators, bars, portfolio, and regime, and news evidence against
+  causal news tool outputs by `source + published_at` or headline token.
+- Add `compute_mcp_time_machine_audit` as an artifact-level audit over `decisions.jsonl`.
+  It checks MCP call summaries, role-visible tool outputs, orders, and fills for timestamps
+  after `t_now`, and reports source counts so cache/API fallbacks remain visible.
+- Wire both metrics into `scripts/run_pm_multiday.py` and `scripts/eval_run.py`.
+
+**Medium news run audit (`pm_api_smoke_20260529_132827`):**
+- MCP time-machine audit: pass, `0/914` timestamp violations.
+- Source counts: `get_news_corpus:news_corpus=57`, `get_price_history:cache+api=57`,
+  `compute_indicators:local=57`, `get_current_regime:local=57`,
+  `get_portfolio:paper_portfolio=19`.
+- PM evidence grounding: `0.9985` (`650/651` checkable grounded), coverage `0.9574`
+  (`651/680` evidence items), 29 qualitative unchecked items, 1 ungrounded news item.
+
+**Consequence:** The thesis can now distinguish three claims cleanly:
+1. no temporal leakage in the completed artifact,
+2. numeric final-rationale grounding,
+3. PM analyst evidence grounding against MCP outputs.
+
+---
+
 ### 2026-05-29 - News integration scaffold: methodology locked before corpus build
 
 **Context:** The news analyst was hallucinating signals from technical data (Bug #1, fixed).

@@ -33,6 +33,8 @@ def main(
         _segment_by_regime,
         compute_faithfulness_llm,
         compute_grounding,
+        compute_mcp_time_machine_audit,
+        compute_pm_evidence_grounding,
         compute_pm_faithfulness,
     )
 
@@ -86,6 +88,30 @@ def main(
             print("    By ticker:")
             for tk, stats in sorted(pm_faith["by_ticker"].items()):
                 print(f"      {tk}: {stats}")
+
+        time_audit = compute_mcp_time_machine_audit(decisions)
+        print("\n  MCP TIME-MACHINE AUDIT:")
+        print(
+            f"    pass          : {time_audit['pass']} "
+            f"({time_audit['n_violations']} violations / "
+            f"{time_audit['n_timestamp_checks']} checks)"
+        )
+        print(f"    source warnings: {time_audit['n_live_source_warnings']}")
+        if time_audit["violations"]:
+            print(f"    first violation: {time_audit['violations'][0]}")
+
+        pm_grounding = compute_pm_evidence_grounding(decisions)
+        print("\n  PM EVIDENCE GROUNDING:")
+        print(
+            f"    grounded      : {pm_grounding['pm_evidence_grounding']:.4f} "
+            f"({pm_grounding['n_grounded']}/{pm_grounding['n_checkable']} checkable)"
+        )
+        print(
+            f"    coverage      : {pm_grounding['pm_evidence_coverage']:.4f} "
+            f"({pm_grounding['n_checkable']}/{pm_grounding['n_evidence_items']} evidence items)"
+        )
+        if pm_grounding["examples"]:
+            print(f"    first issue   : {pm_grounding['examples'][0]}")
 
     # Grounding
     grounding = compute_grounding(decisions)

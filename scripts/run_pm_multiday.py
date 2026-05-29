@@ -114,9 +114,8 @@ def main(
     run_id = engine.run_id
     n_decisions = results.get("n_decisions", 0)
     metrics = results.get("metrics", {})
-    sharpe_ci = results.get("sharpe_ci", {})
 
-    typer.echo(f"\n[FINANCIAL - smoke-scale, NOT thesis-final]")
+    typer.echo("\n[FINANCIAL - smoke-scale, NOT thesis-final]")
     typer.echo(f"  run_id      = {run_id}")
     typer.echo(f"  n_decisions = {n_decisions}")
     typer.echo(f"  AnnReturn   = {metrics.get('annualised_return', 0)*100:+.1f}%")
@@ -139,6 +138,8 @@ def main(
     from mcp_quant_agent.eval.reasoning import (
         _segment_by_regime,
         compute_grounding,
+        compute_mcp_time_machine_audit,
+        compute_pm_evidence_grounding,
         compute_pm_faithfulness,
     )
 
@@ -163,9 +164,38 @@ def main(
             f"    {regime_key}: n={len(rdecs)} ground={g_r['grounding']:.4f}"
         )
 
+    # MCP time-machine audit
+    time_audit = compute_mcp_time_machine_audit(decisions)
+    typer.echo("\n  MCP TIME-MACHINE AUDIT:")
+    typer.echo(
+        f"    pass       = {time_audit['pass']} "
+        f"({time_audit['n_violations']} violations / "
+        f"{time_audit['n_timestamp_checks']} timestamp checks)"
+    )
+    typer.echo(f"    live/cache+api source warnings = {time_audit['n_live_source_warnings']}")
+
+    # PM evidence grounding
+    pm_grounding = compute_pm_evidence_grounding(decisions)
+    typer.echo("\n  PM EVIDENCE GROUNDING:")
+    typer.echo(
+        f"    grounded   = {pm_grounding['pm_evidence_grounding']:.4f} "
+        f"({pm_grounding['n_grounded']}/{pm_grounding['n_checkable']} checkable)"
+    )
+    typer.echo(
+        f"    coverage   = {pm_grounding['pm_evidence_coverage']:.4f} "
+        f"({pm_grounding['n_checkable']}/{pm_grounding['n_evidence_items']} evidence items)"
+    )
+    if pm_grounding.get("examples"):
+        typer.echo("    Examples needing review:")
+        for ex in pm_grounding["examples"][:3]:
+            typer.echo(
+                f"      {ex['date']} {ex['ticker']} {ex['analyst']}: "
+                f"{ex['status']} - {ex['reason']}"
+            )
+
     # PM Faithfulness
     pm_faith = compute_pm_faithfulness(decisions)
-    typer.echo(f"\n  PM FAITHFULNESS:")
+    typer.echo("\n  PM FAITHFULNESS:")
     typer.echo(f"    overall   = {pm_faith['pm_faithfulness']:.4f}")
     typer.echo(f"    strict    = {pm_faith['pm_faithfulness_strict']:.4f}")
     typer.echo(f"    faithful  = {pm_faith['n_faithful']}")
@@ -192,7 +222,7 @@ def main(
         typer.echo(f"\n  MEMORY LOG: {pending} pending, {resolved} resolved")
 
     # ── Cost summary ─────────────────────────────────────────────────────────
-    typer.echo(f"\n=== COST SUMMARY ===")
+    typer.echo("\n=== COST SUMMARY ===")
     typer.echo(f"  PM decisions  : {n_decisions}")
     typer.echo(f"  Est. LLM calls: {n_decisions} PM dates x 11 calls")
     typer.echo(f"  Est. cost     : ${n_decisions * _APPROX_COST_PER_PM_DATE_USD:.4f} (0 if cache hit)")
@@ -210,6 +240,8 @@ def main(
         "n_decisions": n_decisions,
         "metrics": {k: float(v) for k, v in metrics.items()},
         "grounding_overall": grounding.get("grounding", 0),
+        "mcp_time_machine_audit": time_audit,
+        "pm_evidence_grounding": pm_grounding,
         "pm_faithfulness": pm_faith.get("pm_faithfulness", 0),
         "pm_faithfulness_strict": pm_faith.get("pm_faithfulness_strict", 0),
     }

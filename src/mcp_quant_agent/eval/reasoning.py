@@ -43,10 +43,12 @@ KellyBench (arXiv:2604.27865) §4 — knowledge-action gap + sophistication rubr
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import hashlib
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -97,6 +99,10 @@ def _extract_portfolio_snapshot(decision: dict[str, Any]) -> dict[str, Any]:
     for to in decision.get("tool_outputs", []):
         if isinstance(to, dict) and to.get("tool") == "get_portfolio":
             return {k: v for k, v in to.items() if k != "tool"}
+    for key in ("portfolio_before", "portfolio_after"):
+        snapshot = decision.get(key)
+        if isinstance(snapshot, dict):
+            return snapshot
     return {}
 
 
@@ -910,6 +916,426 @@ def compute_grounding(
         "n_grounded": n_grounded,
         "n_decisions_with_claims": n_with_claims,
         "examples_ungrounded": ungrounded_examples,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2b. PM evidence grounding + MCP time-machine audit
+#
+# These checks complement the lower-level clock/cache tests.  They operate on
+# completed decisions.jsonl artifacts, which is the evidence used in the thesis.
+# ---------------------------------------------------------------------------
+
+_DOMAIN_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "but",
+    "for",
+    "from",
+    "in",
+    "is",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+}
+
+
+def _parse_audit_date(raw: Any) -> dt.date | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    with contextlib.suppress(ValueError):
+        return dt.datetime.fromisoformat(text).date()
+    with contextlib.suppress(ValueError):
+        return dt.date.fromisoformat(text[:10])
+    return None
+
+
+def _record_timestamp_check(
+    *,
+    raw_timestamp: Any,
+    t_now: dt.date | None,
+    decision: dict[str, Any],
+    path: str,
+    violations: list[dict[str, Any]],
+) -> int:
+    if raw_timestamp in (None, ""):
+        return 0
+    checked_date = _parse_audit_date(raw_timestamp)
+    if checked_date is None:
+        violations.append(
+            {
+                "date": decision.get("date"),
+                "ticker": decision.get("ticker"),
+                "path": path,
+                "timestamp": raw_timestamp,
+                "reason": "unparseable timestamp",
+            }
+        )
+        return 1
+    if t_now is None or checked_date > t_now:
+        violations.append(
+            {
+                "date": decision.get("date"),
+                "ticker": decision.get("ticker"),
+                "path": path,
+                "timestamp": raw_timestamp,
+                "t_now": decision.get("date"),
+                "reason": "timestamp after t_now",
+            }
+        )
+    return 1
+
+
+def compute_mcp_time_machine_audit(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Audit a decisions.jsonl artifact for MCP time-machine invariants."""
+    n_checks = 0
+    violations: list[dict[str, Any]] = []
+    source_counts: Counter[str] = Counter()
+    tool_counts: Counter[str] = Counter()
+    live_source_warnings: list[dict[str, Any]] = []
+
+    for row_idx, decision in enumerate(decisions):
+        t_now = _parse_audit_date(decision.get("date") or decision.get("t_now"))
+        if t_now is None:
+            violations.append(
+                {
+                    "row": row_idx,
+                    "date": decision.get("date"),
+                    "path": "decision.date",
+                    "reason": "missing or unparseable decision date",
+                }
+            )
+
+        for call_idx, call in enumerate(decision.get("mcp_calls", [])):
+            if not isinstance(call, dict):
+                continue
+            tool = str(call.get("tool") or "unknown")
+            source = str(call.get("source") or "unknown")
+            tool_counts[tool] += 1
+            source_counts[f"{tool}:{source}"] += 1
+            if "api" in source.lower():
+                live_source_warnings.append(
+                    {
+                        "date": decision.get("date"),
+                        "ticker": call.get("ticker"),
+                        "tool": tool,
+                        "source": source,
+                    }
+                )
+            n_checks += _record_timestamp_check(
+                raw_timestamp=call.get("max_timestamp"),
+                t_now=t_now,
+                decision=decision,
+                path=f"mcp_calls[{call_idx}].max_timestamp",
+                violations=violations,
+            )
+
+        for out_idx, output in enumerate(decision.get("tool_outputs", [])):
+            if not isinstance(output, dict):
+                continue
+            tool = str(output.get("tool") or "unknown")
+            tool_counts[tool] += 1
+            n_checks += _record_timestamp_check(
+                raw_timestamp=output.get("max_timestamp"),
+                t_now=t_now,
+                decision=decision,
+                path=f"tool_outputs[{out_idx}].max_timestamp",
+                violations=violations,
+            )
+            for bar_idx, bar in enumerate(output.get("bars_recent", [])):
+                if isinstance(bar, dict):
+                    n_checks += _record_timestamp_check(
+                        raw_timestamp=bar.get("date"),
+                        t_now=t_now,
+                        decision=decision,
+                        path=f"tool_outputs[{out_idx}].bars_recent[{bar_idx}].date",
+                        violations=violations,
+                    )
+            for item_idx, item in enumerate(output.get("items_recent", [])):
+                if isinstance(item, dict):
+                    n_checks += _record_timestamp_check(
+                        raw_timestamp=(
+                            item.get("datetime")
+                            or item.get("published_at")
+                            or item.get("date")
+                        ),
+                        t_now=t_now,
+                        decision=decision,
+                        path=f"tool_outputs[{out_idx}].items_recent[{item_idx}].datetime",
+                        violations=violations,
+                    )
+            values = output.get("values")
+            if isinstance(values, dict):
+                n_checks += _record_timestamp_check(
+                    raw_timestamp=values.get("date"),
+                    t_now=t_now,
+                    decision=decision,
+                    path=f"tool_outputs[{out_idx}].values.date",
+                    violations=violations,
+                )
+
+        for order_idx, order in enumerate(decision.get("orders", [])):
+            if isinstance(order, dict):
+                n_checks += _record_timestamp_check(
+                    raw_timestamp=order.get("date"),
+                    t_now=t_now,
+                    decision=decision,
+                    path=f"orders[{order_idx}].date",
+                    violations=violations,
+                )
+        for fill_idx, fill in enumerate(decision.get("fills", [])):
+            if isinstance(fill, dict):
+                n_checks += _record_timestamp_check(
+                    raw_timestamp=fill.get("timestamp"),
+                    t_now=t_now,
+                    decision=decision,
+                    path=f"fills[{fill_idx}].timestamp",
+                    violations=violations,
+                )
+
+    return {
+        "pass": len(violations) == 0,
+        "n_decisions": len(decisions),
+        "n_timestamp_checks": n_checks,
+        "n_violations": len(violations),
+        "violations": violations[:25],
+        "tool_counts": dict(sorted(tool_counts.items())),
+        "source_counts": dict(sorted(source_counts.items())),
+        "n_live_source_warnings": len(live_source_warnings),
+        "live_source_warnings": live_source_warnings[:25],
+    }
+
+
+def _tool_outputs_for_ticker(
+    decision: dict[str, Any],
+    ticker: str,
+    tool: str | None = None,
+) -> list[dict[str, Any]]:
+    ticker_upper = ticker.upper()
+    outputs: list[dict[str, Any]] = []
+    for output in decision.get("tool_outputs", []):
+        if not isinstance(output, dict):
+            continue
+        if str(output.get("ticker", "")).upper() != ticker_upper:
+            continue
+        if tool is not None and output.get("tool") != tool:
+            continue
+        outputs.append(output)
+    return outputs
+
+
+def _numeric_source_values_for_report(
+    decision: dict[str, Any],
+    ticker: str,
+) -> list[float]:
+    values: list[float] = []
+    for output in _tool_outputs_for_ticker(decision, ticker):
+        if output.get("tool") == "compute_indicators" and isinstance(
+            output.get("values"), dict
+        ):
+            values.extend(
+                float(value)
+                for value in output["values"].values()
+                if isinstance(value, int | float) and not isinstance(value, bool)
+            )
+        for bar in output.get("bars_recent", []):
+            if not isinstance(bar, dict):
+                continue
+            for key in ("open", "high", "low", "close", "volume"):
+                value = bar.get(key)
+                if isinstance(value, int | float) and not isinstance(value, bool):
+                    values.append(float(value))
+
+    portfolio = _extract_portfolio_snapshot(decision)
+    for key in (
+        "nav",
+        "cash",
+        "total_market_value",
+        "total_commission",
+        "total_turnover",
+    ):
+        value = portfolio.get(key)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            values.append(float(value))
+    for pos in portfolio.get("positions", []):
+        if not isinstance(pos, dict):
+            continue
+        if str(pos.get("ticker", "")).upper() != ticker.upper():
+            continue
+        for key in ("quantity", "market_value", "current_price", "avg_cost", "pct_of_nav"):
+            value = pos.get(key)
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                values.append(float(value))
+    return values
+
+
+def _decimal_values(text: str) -> list[float]:
+    values: list[float] = []
+    for match in re.finditer(r"(?<![\w.])-?\d+\.\d+(?![\w.])", text):
+        with contextlib.suppress(ValueError):
+            values.append(float(match.group(0)))
+    return values
+
+
+def _value_matches_sources(
+    value: float,
+    sources: list[float],
+    tolerance: float = 0.01,
+) -> bool:
+    for source in sources:
+        if source == 0:
+            if abs(value) < 1e-6:
+                return True
+            continue
+        if abs(value - source) <= 0.01:
+            return True
+        if abs(value - source) / abs(source) <= tolerance:
+            return True
+    return False
+
+
+def _regime_grounded(decision: dict[str, Any], ticker: str, text: str) -> bool:
+    regimes = decision.get("regimes")
+    regime = None
+    if isinstance(regimes, dict):
+        regime = regimes.get(ticker.upper()) or regimes.get(ticker)
+    if regime is None:
+        regime = decision.get("regime")
+    if regime is None:
+        return False
+    return str(regime).lower() in text.lower()
+
+
+def _news_evidence_grounded(decision: dict[str, Any], ticker: str, evidence: str) -> bool:
+    text = evidence.lower()
+    for output in _tool_outputs_for_ticker(decision, ticker):
+        if output.get("tool") not in {"get_news_corpus", "get_news_items_cache_first"}:
+            continue
+        for item in output.get("items_recent", []):
+            if not isinstance(item, dict):
+                continue
+            published = str(
+                item.get("datetime") or item.get("published_at") or item.get("date") or ""
+            )
+            source = str(item.get("source") or "").lower()
+            headline = str(item.get("headline") or item.get("title") or "").lower()
+            if not published or published[:10] not in text:
+                continue
+            if source and source in text:
+                return True
+            headline_tokens = {
+                token
+                for token in re.findall(r"[a-zA-Z][a-zA-Z0-9]+", headline)
+                if len(token) >= 5 and token.lower() not in _DOMAIN_STOPWORDS
+            }
+            if headline_tokens and any(token.lower() in text for token in headline_tokens):
+                return True
+    return False
+
+
+def _ground_pm_evidence_item(
+    decision: dict[str, Any],
+    report: dict[str, Any],
+    evidence: str,
+) -> tuple[str, str]:
+    analyst = str(report.get("analyst") or "")
+    ticker = str(report.get("ticker") or "")
+    if analyst == "news":
+        if _news_evidence_grounded(decision, ticker, evidence):
+            return "grounded", "news_source_date_match"
+        return "ungrounded", "news evidence not found in causal news tool output"
+
+    values = _decimal_values(evidence)
+    if values:
+        sources = _numeric_source_values_for_report(decision, ticker)
+        missing = [
+            value for value in values if not _value_matches_sources(value, sources)
+        ]
+        if not missing:
+            return "grounded", "numeric_values_match_tool_outputs"
+        return "ungrounded", f"numeric values not in tool outputs: {missing[:3]}"
+
+    if _regime_grounded(decision, ticker, evidence):
+        return "grounded", "regime_matches_tool_output"
+    return "unchecked", "qualitative evidence without numeric/regime/date anchor"
+
+
+def compute_pm_evidence_grounding(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Ground PM analyst evidence against role-visible MCP tool outputs.
+
+    Qualitative evidence without a deterministic anchor is reported as
+    ``unchecked`` rather than counted as a hallucination.
+    """
+    by_analyst: dict[str, Counter[str]] = {}
+    n_reports = 0
+    n_reports_without_evidence = 0
+    examples: list[dict[str, Any]] = []
+
+    for decision in decisions:
+        if decision.get("is_error") or decision.get("pm_api_error"):
+            continue
+        for report in decision.get("reports", []):
+            if not isinstance(report, dict):
+                continue
+            n_reports += 1
+            analyst = str(report.get("analyst") or "unknown")
+            by_analyst.setdefault(analyst, Counter())
+            evidence_items = report.get("evidence", [])
+            if not evidence_items:
+                n_reports_without_evidence += 1
+                continue
+            for evidence in evidence_items:
+                status, reason = _ground_pm_evidence_item(
+                    decision,
+                    report,
+                    str(evidence),
+                )
+                by_analyst[analyst][status] += 1
+                if status != "grounded" and len(examples) < 10:
+                    examples.append(
+                        {
+                            "date": decision.get("date"),
+                            "ticker": report.get("ticker"),
+                            "analyst": analyst,
+                            "status": status,
+                            "reason": reason,
+                            "evidence": str(evidence)[:200],
+                        }
+                    )
+
+    totals: Counter[str] = Counter()
+    for counts in by_analyst.values():
+        totals.update(counts)
+    n_checkable = totals["grounded"] + totals["ungrounded"]
+    n_total = n_checkable + totals["unchecked"]
+    return {
+        "pm_evidence_grounding": (
+            round(totals["grounded"] / n_checkable, 4) if n_checkable else 0.0
+        ),
+        "pm_evidence_coverage": round(n_checkable / n_total, 4) if n_total else 0.0,
+        "n_reports": n_reports,
+        "n_reports_without_evidence": n_reports_without_evidence,
+        "n_evidence_items": n_total,
+        "n_checkable": n_checkable,
+        "n_grounded": totals["grounded"],
+        "n_ungrounded": totals["ungrounded"],
+        "n_unchecked": totals["unchecked"],
+        "by_analyst": {
+            analyst: dict(sorted(counts.items()))
+            for analyst, counts in sorted(by_analyst.items())
+        },
+        "examples": examples,
+        "final_rationale_numeric_grounding": compute_grounding(decisions),
     }
 
 
