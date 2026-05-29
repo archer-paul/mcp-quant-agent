@@ -45,7 +45,10 @@ from typing import Any
 import pandas as pd
 
 from mcp_quant_agent.eval.financial import bootstrap_sharpe_ci, compute_all_metrics
-from mcp_quant_agent.mcp_servers.data.yfinance_source import _fetch_raw_bars
+from mcp_quant_agent.mcp_servers.data.yfinance_source import (
+    _fetch_raw_bars,
+    _yfinance_end_exclusive,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +73,12 @@ def _load_prices(ticker: str, start_date: str, end_date: str) -> pd.DataFrame | 
     Returns ``None`` if no data is available.
     """
     try:
-        bars = _fetch_raw_bars(ticker, start_date, end_date, "1d")
+        bars = _fetch_raw_bars(
+            ticker,
+            start_date,
+            _yfinance_end_exclusive(end_date, "1d"),
+            "1d",
+        )
     except Exception as exc:
         logger.warning("Failed to fetch %s: %s", ticker, exc)
         return None

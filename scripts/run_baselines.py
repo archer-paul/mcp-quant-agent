@@ -197,6 +197,12 @@ def main(
     momentum_lookback: int = typer.Option(
         252, help="Momentum lookback in trading days."
     ),
+    bb_window: int = typer.Option(
+        20, help="Bollinger-band lookback in trading days."
+    ),
+    bb_num_std: float = typer.Option(
+        2.0, help="Bollinger-band standard-deviation multiplier."
+    ),
     save_results: bool = typer.Option(True, help="Save results to results/ directory."),
     json_output: bool = typer.Option(
         False, help="Print full JSON results (in addition to table)."
@@ -218,6 +224,8 @@ def main(
             end_date=end,
             initial_cash=initial_cash,
             momentum_lookback=momentum_lookback,
+            bb_window=bb_window,
+            bb_num_std=bb_num_std,
         )
     except Exception as exc:
         typer.echo(f"ERROR: {exc}", err=True)

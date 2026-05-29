@@ -5,7 +5,7 @@ stays within the credit budget envelope agreed for Step 2.
 
 Two guard tiers:
   - ``PMSmokeGuardResult``: original 1-date / 1-2 tickers guard (smoke only).
-  - ``PMMultiDayGuardResult``: bounded multi-date guard (max 10 dates / 3 tickers).
+  - ``PMMultiDayGuardResult``: bounded multi-date guard (max 22 dates / 3 tickers).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ class PMSmokeGuardResult:
 
 @dataclass(frozen=True)
 class PMMultiDayGuardResult:
-    """Validated multi-day bounded PM API request (max 10 dates, max 3 tickers).
+    """Validated multi-day bounded PM API request (max 22 dates, max 3 tickers).
 
     Same safety properties as PMSmokeGuardResult except the date range is
     extended to allow meaningful regime coverage.  Still requires dev model,
@@ -141,7 +141,7 @@ def validate_pm_multiday_request(
     use_llm_cache: bool,
     acknowledge_cost: bool,
 ) -> PMMultiDayGuardResult:
-    """Validate a bounded multi-day PM API run (max 10 dates, max 3 tickers).
+    """Validate a bounded multi-day PM API run (max 22 dates, max 3 tickers).
 
     Relaxes the 1-date constraint from ``validate_pm_api_smoke_request`` while
     keeping all other safety properties: dev model only, LLM cache on,
@@ -159,7 +159,8 @@ def validate_pm_multiday_request(
         raise RuntimeError(
             f"PM multi-day run must span at most {_MAX_MULTIDAY_DATES} trading dates "
             f"(got ~{n_dates} between {start} and {end}). "
-            "Use run_thesis_backtest.py for full production runs."
+            "Do not bypass this guard for PM API runs; use the single-agent "
+            "thesis backtest for the full two-year production result."
         )
 
     cleaned_tickers = sorted({ticker.strip().upper() for ticker in tickers if ticker.strip()})

@@ -265,6 +265,23 @@ class TestAdjustedPriceLeakage:
             f"kwargs received: {call_kwargs}"
         )
 
+    def test_get_price_history_fetches_day_after_inclusive_daily_end(self) -> None:
+        from mcp_quant_agent.mcp_servers.data.yfinance_source import get_price_history
+
+        with patch(
+            "mcp_quant_agent.mcp_servers.data.yfinance_source._fetch_raw_bars",
+            return_value=[],
+        ) as mock_fetch:
+            get_price_history(
+                "AAPL",
+                "2022-06-01",
+                "2022-06-15",
+                interval="1d",
+                use_cache=False,
+            )
+
+        mock_fetch.assert_called_once_with("AAPL", "2022-06-01", "2022-06-16", "1d")
+
 
 # ---------------------------------------------------------------------------
 # 10–11. Parquet cache temporal filter

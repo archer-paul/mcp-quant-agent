@@ -269,6 +269,38 @@ def test_pm_engine_loads_prices_from_existing_cache_without_fetch(
     assert engine._price_sources["AAPL"] == "cache"
 
 
+def test_pm_engine_price_offline_fails_on_incomplete_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp_quant_agent.mcp_servers.data.cache import PriceCache
+
+    cache = PriceCache(cache_dir=tmp_path)
+
+    def fail_fetch(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+        raise AssertionError("price_offline=True must not fetch prices")
+
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.yfinance_source._get_cache",
+        lambda: cache,
+    )
+    monkeypatch.setattr(
+        "mcp_quant_agent.mcp_servers.data.yfinance_source._fetch_raw_bars",
+        fail_fetch,
+    )
+
+    engine = PMBacktestEngine(
+        tickers=["AAPL"],
+        start_date="2022-02-05",
+        end_date="2022-02-09",
+        price_offline=True,
+        write_artifacts=False,
+    )
+
+    with pytest.raises(RuntimeError, match="price_offline=True forbids API fetch"):
+        engine._load_price_data()
+
+
 class _MockPMBackbone:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []

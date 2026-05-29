@@ -204,12 +204,18 @@ class BacktestEngine:
         from mcp_quant_agent.mcp_servers.data.yfinance_source import (
             _fetch_raw_bars,
             _get_cache,
+            _yfinance_end_exclusive,
         )
         price_data: dict[str, list[dict[str, Any]]] = {}
         for ticker in self.tickers:
             try:
                 # Fetch warm-up + full backtest range
-                all_bars = _fetch_raw_bars(ticker, warmup_start, self.end_date, "1d")
+                all_bars = _fetch_raw_bars(
+                    ticker,
+                    warmup_start,
+                    _yfinance_end_exclusive(self.end_date, "1d"),
+                    "1d",
+                )
                 if all_bars:
                     # Overwrite the parquet cache so perceive_ticker finds warm-up data.
                     # IMPORTANT: use cache.write() (overwrite), NOT merge_and_write().

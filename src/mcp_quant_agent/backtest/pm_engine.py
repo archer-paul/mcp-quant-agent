@@ -31,6 +31,7 @@ class PMBacktestEngine:
         use_stub: bool = True,
         price_data: dict[str, list[dict[str, Any]]] | None = None,
         news_data: dict[str, list[dict[str, Any]]] | None = None,
+        price_offline: bool = False,
         news_offline: bool = True,
         allow_empty_news: bool = False,
         min_trade_notional: float = 100.0,
@@ -49,6 +50,7 @@ class PMBacktestEngine:
         self.use_stub = use_stub
         self.price_data = price_data
         self.news_data = news_data
+        self.price_offline = price_offline
         self.news_offline = news_offline
         self.allow_empty_news = allow_empty_news
         self.min_trade_notional = min_trade_notional
@@ -541,6 +543,7 @@ class PMBacktestEngine:
             _check_price_continuity,
             _fetch_raw_bars,
             _get_cache,
+            _yfinance_end_exclusive,
         )
         warmup_start = (
             dt.date.fromisoformat(self.start_date)
@@ -553,8 +556,26 @@ class PMBacktestEngine:
             source = "cache"
 
             if self._price_cache_needs_refresh(cached):
+                if self.price_offline:
+                    dates = sorted(str(row.get("date", "")) for row in cached)
+                    observed = (
+                        f"{dates[0]}->{dates[-1]} ({len(dates)} rows)"
+                        if dates
+                        else "empty cache"
+                    )
+                    raise RuntimeError(
+                        "Price cache miss/incomplete for "
+                        f"{ticker} {warmup_start}->{self.end_date}: {observed}. "
+                        "price_offline=True forbids API fetch; prewarm the "
+                        "price cache or pass explicit price_data."
+                    )
                 source = "api" if not cached else "cache+api"
-                bars = _fetch_raw_bars(ticker, warmup_start, self.end_date, "1d")
+                bars = _fetch_raw_bars(
+                    ticker,
+                    warmup_start,
+                    _yfinance_end_exclusive(self.end_date, "1d"),
+                    "1d",
+                )
                 if bars:
                     cache.merge_and_write(ticker, "1d", bars)
                 cached = self._cached_price_window(cache, ticker, warmup_start)

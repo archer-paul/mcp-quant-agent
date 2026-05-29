@@ -23,6 +23,7 @@ Design decisions (see docs/DECISIONS.md for full rationale)
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from typing import Any
 
@@ -47,6 +48,13 @@ def _get_cache() -> PriceCache:
     if _cache is None:
         _cache = PriceCache()
     return _cache
+
+
+def _yfinance_end_exclusive(end_date: str, interval: str = "1d") -> str:
+    """Convert the wrapper's inclusive daily end date to yfinance's exclusive end."""
+    if interval == "1d" and len(end_date) == 10:
+        return (dt.date.fromisoformat(end_date) + dt.timedelta(days=1)).isoformat()
+    return end_date
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +257,12 @@ def get_price_history(
         if latest is None or latest < end_date:
             # Cache miss or stale tail — fetch from API
             fetch_start = start_date if latest is None else latest
-            raw = _fetch_raw_bars(ticker, fetch_start, end_date, interval)
+            raw = _fetch_raw_bars(
+                ticker,
+                fetch_start,
+                _yfinance_end_exclusive(end_date, interval),
+                interval,
+            )
             if raw:
                 cache.merge_and_write(ticker, interval, raw)
 
@@ -257,7 +270,12 @@ def get_price_history(
         # Apply date range filter first (don't return data outside requested window)
         bars = [b for b in bars if str(b["date"]) >= start_date]
     else:
-        bars = _fetch_raw_bars(ticker, start_date, end_date, interval)
+        bars = _fetch_raw_bars(
+            ticker,
+            start_date,
+            _yfinance_end_exclusive(end_date, interval),
+            interval,
+        )
 
     # Validate bars read from cache — guards against data written by older
     # code before the bar validation layer existed (e.g. run #1 corrupt cache).

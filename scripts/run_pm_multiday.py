@@ -2,10 +2,10 @@
 """Bounded multi-day PM multi-agent real run + eval pipeline.
 
 Guardrails:
-  - Max 10 trading dates, max 3 tickers.
+  - Max 22 trading dates, max 3 tickers.
   - Dev model only, LLM cache on, --acknowledge-cost required.
   - Runs eval (grounding + PM faithfulness) on the output JSONL.
-  - Labels results 'smoke-scale, not thesis-final'.
+  - Optional --price-offline fails loud if cached prices are incomplete.
 
 Usage:
   # Bear window A (4 dates, 3 tickers):
@@ -45,6 +45,11 @@ def main(
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Guardrail check only, no API calls."),
     allow_empty_news: bool = typer.Option(False, help="Allow missing news cache."),
+    price_offline: bool = typer.Option(
+        False,
+        "--price-offline",
+        help="Forbid price API fetches; fail if the local price cache is incomplete.",
+    ),
     label: str = typer.Option("", help="Optional label for this run."),
     output_root: Path = typer.Option(Path("."), help="Root for runs/ and results/."),
 ) -> None:
@@ -79,6 +84,8 @@ def main(
     typer.echo(f"  est. cost (uncached): ${est_cost:.4f}")
     if label:
         typer.echo(f"  label     : {label}")
+    if price_offline:
+        typer.echo("  prices    : cache-only (--price-offline)")
 
     if dry_run:
         typer.echo("\n[DRY RUN] Guardrail check passed. No API calls made.")
@@ -103,6 +110,7 @@ def main(
             use_llm_cache=True,
             smoke_guard=guard,
             allow_empty_news=allow_empty_news,
+            price_offline=price_offline,
             write_artifacts=True,
             output_root=output_root,
         )
@@ -115,7 +123,7 @@ def main(
     n_decisions = results.get("n_decisions", 0)
     metrics = results.get("metrics", {})
 
-    typer.echo("\n[FINANCIAL - smoke-scale, NOT thesis-final]")
+    typer.echo("\n[FINANCIAL - bounded PM run]")
     typer.echo(f"  run_id      = {run_id}")
     typer.echo(f"  n_decisions = {n_decisions}")
     typer.echo(f"  AnnReturn   = {metrics.get('annualised_return', 0)*100:+.1f}%")
@@ -237,6 +245,11 @@ def main(
         "start": start,
         "end": end,
         "model": chosen_model,
+        "use_llm_cache": True,
+        "price_offline": price_offline,
+        "news_corpus_enabled": settings.news_corpus_enabled,
+        "news_corpus_dir": str(settings.news_corpus_dir),
+        "transaction_cost_bps": settings.transaction_cost_bps,
         "n_decisions": n_decisions,
         "metrics": {k: float(v) for k, v in metrics.items()},
         "grounding_overall": grounding.get("grounding", 0),
